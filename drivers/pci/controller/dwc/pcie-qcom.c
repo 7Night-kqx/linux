@@ -1143,22 +1143,27 @@ static void qcom_pcie_deinit_2_7_0(struct qcom_pcie *pcie)
 
 static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
 {
-	/* iommu map structure */
+	/*
+	 * One iommu-map entry as laid out in the DT: <bdf phandle
+	 * iommu-specifier length>. The specifier is #iommu-cells wide (2 on
+	 * the SMMUs these SoCs use: SID and mask), so an entry is not a fixed
+	 * four cells and has to be walked with the stride of_map_id() uses.
+	 */
 	struct {
 		u32 bdf;
-		u32 phandle;
 		u32 smmu_sid;
-		u32 smmu_sid_len;
 	} *map;
 	void __iomem *bdf_to_sid_base = pcie->parf + PARF_BDF_TO_SID_TABLE_N;
 	struct device *dev = pcie->pci->dev;
+	struct device_node *iommu_np;
 	u8 qcom_pcie_crc8_table[CRC8_TABLE_SIZE];
-	int i, nr_map, size = 0;
-	u32 smmu_sid_base;
+	int i, nr_map, size = 0, stride;
+	u32 smmu_sid_base, iommu_cells = 1;
+	const __be32 *prop;
 	u32 val;
 
-	of_get_property(dev->of_node, "iommu-map", &size);
-	if (!size)
+	prop = of_get_property(dev->of_node, "iommu-map", &size);
+	if (!prop || !size)
 		return 0;
 
 	/* Enable BDF to SID translation by disabling bypass mode (default) */
@@ -1166,14 +1171,24 @@ static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
 	val &= ~BDF_TO_SID_BYPASS;
 	writel(val, pcie->parf + PARF_BDF_TO_SID_CFG);
 
-	map = kzalloc(size, GFP_KERNEL);
+	iommu_np = of_find_node_by_phandle(be32_to_cpup(prop + 1));
+	if (iommu_np) {
+		of_property_read_u32(iommu_np, "#iommu-cells", &iommu_cells);
+		of_node_put(iommu_np);
+	}
+	stride = 2 + iommu_cells + 1;
+	nr_map = size / sizeof(u32) / stride;
+	if (!nr_map)
+		return 0;
+
+	map = kcalloc(nr_map, sizeof(*map), GFP_KERNEL);
 	if (!map)
 		return -ENOMEM;
 
-	of_property_read_u32_array(dev->of_node, "iommu-map", (u32 *)map,
-				   size / sizeof(u32));
-
-	nr_map = size / (sizeof(*map));
+	for (i = 0; i < nr_map; i++) {
+		map[i].bdf = be32_to_cpup(prop + i * stride);
+		map[i].smmu_sid = be32_to_cpup(prop + i * stride + 2);
+	}
 
 	crc8_populate_msb(qcom_pcie_crc8_table, QCOM_PCIE_CRC8_POLYNOMIAL);
 

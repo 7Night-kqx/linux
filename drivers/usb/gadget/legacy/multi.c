@@ -188,9 +188,28 @@ static int rndis_config_register(struct usb_composite_dev *cdev)
 		.bConfigurationValue	= MULTI_RNDIS_CONFIG_NUM,
 		.bmAttributes		= USB_CONFIG_ATT_SELFPOWER,
 	};
+	static const u8 msft100_qw_sign[OS_STRING_QW_SIGN_LEN] = {
+		/* "MSFT100" in UTF-16LE: the qwSignature Windows looks for. */
+		'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0,
+	};
 
 	config.label          = strings_dev[MULTI_STRING_RNDIS_CONFIG_IDX].s;
 	config.iConfiguration = strings_dev[MULTI_STRING_RNDIS_CONFIG_IDX].id;
+
+	/* Windows binds RNDIS only through the MS OS string descriptor
+	 * (string id 0xEE) and the vendor ExtCompatID request: f_rndis
+	 * advertises CDC-ECM class codes on its control interface and no
+	 * Windows inbox driver claims those without the "RNDIS"
+	 * CompatibleID. Configfs gadgets opt in via the os_desc directory;
+	 * legacy gadgets never set use_os_string, so the RNDIS interface
+	 * enumerated on Windows with no driver bound. Opt in here for the
+	 * Windows-dedicated configuration: f_rndis already carries the
+	 * "RNDIS" ExtCompatID in its os_desc_table.
+	 */
+	cdev->use_os_string = true;
+	cdev->b_vendor_code = 0xa5;
+	memcpy(cdev->qw_sign, msft100_qw_sign, sizeof(msft100_qw_sign));
+	cdev->os_desc_config = &config;
 
 	return usb_add_config(cdev, &config, rndis_do_config);
 }

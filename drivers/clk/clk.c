@@ -2161,11 +2161,35 @@ static void clk_reparent(struct clk_core *core, struct clk_core *new_parent)
 	core->parent = new_parent;
 }
 
+/*
+ * References taken by __clk_set_parent_before() so that
+ * __clk_set_parent_after() can release exactly those and no others.
+ *
+ * The prepare/enable calls in _before() can genuinely fail -- a parent's
+ * .prepare may return an error, for instance a PLL that is asked to lock
+ * before it has been configured, which is what happens when registering a
+ * clock provider makes a consumer stop being an orphan. _after() used to
+ * undo them unconditionally, which dropped references that were never taken
+ * and produced "%s already disabled" / "%s already unprepared" warnings.
+ */
+struct clk_parent_migration {
+	/* clocks a CLK_OPS_PARENT_ENABLE reference was actually taken on */
+	struct clk_core *enabled_old_parent;
+	struct clk_core *enabled_new_parent;
+	/* prepare-count migration reference was taken on the new parent */
+	bool prepare_migrated;
+	/* core itself was enabled to block a racing clk_enable() */
+	bool core_enabled;
+};
+
 static struct clk_core *__clk_set_parent_before(struct clk_core *core,
-					   struct clk_core *parent)
+					   struct clk_core *parent,
+					   struct clk_parent_migration *mig)
 {
 	unsigned long flags;
 	struct clk_core *old_parent = core->parent;
+
+	memset(mig, 0, sizeof(*mig));
 
 	/*
 	 * 1. enable parents for CLK_OPS_PARENT_ENABLE clock
@@ -2189,14 +2213,16 @@ static struct clk_core *__clk_set_parent_before(struct clk_core *core,
 
 	/* enable old_parent & parent if CLK_OPS_PARENT_ENABLE is set */
 	if (core->flags & CLK_OPS_PARENT_ENABLE) {
-		clk_core_prepare_enable(old_parent);
-		clk_core_prepare_enable(parent);
+		if (!clk_core_prepare_enable(old_parent))
+			mig->enabled_old_parent = old_parent;
+		if (!clk_core_prepare_enable(parent))
+			mig->enabled_new_parent = parent;
 	}
 
 	/* migrate prepare count if > 0 */
 	if (core->prepare_count) {
-		clk_core_prepare_enable(parent);
-		clk_core_enable_lock(core);
+		mig->prepare_migrated = !clk_core_prepare_enable(parent);
+		mig->core_enabled = !clk_core_enable_lock(core);
 	}
 
 	/* update the clk tree topology */
@@ -2209,32 +2235,36 @@ static struct clk_core *__clk_set_parent_before(struct clk_core *core,
 
 static void __clk_set_parent_after(struct clk_core *core,
 				   struct clk_core *parent,
-				   struct clk_core *old_parent)
+				   struct clk_core *old_parent,
+				   const struct clk_parent_migration *mig)
 {
 	/*
 	 * Finish the migration of prepare state and undo the changes done
 	 * for preventing a race with clk_enable().
+	 *
+	 * Callers may pass @parent and @old_parent swapped to roll a failed
+	 * reparent back, so the CLK_OPS_PARENT_ENABLE references are released
+	 * through the clk pointers recorded in @mig rather than positionally.
 	 */
-	if (core->prepare_count) {
+	if (mig->core_enabled)
 		clk_core_disable_lock(core);
+	if (mig->prepare_migrated)
 		clk_core_disable_unprepare(old_parent);
-	}
 
 	/* re-balance ref counting if CLK_OPS_PARENT_ENABLE is set */
-	if (core->flags & CLK_OPS_PARENT_ENABLE) {
-		clk_core_disable_unprepare(parent);
-		clk_core_disable_unprepare(old_parent);
-	}
+	clk_core_disable_unprepare(mig->enabled_new_parent);
+	clk_core_disable_unprepare(mig->enabled_old_parent);
 }
 
 static int __clk_set_parent(struct clk_core *core, struct clk_core *parent,
 			    u8 p_index)
 {
+	struct clk_parent_migration mig;
 	unsigned long flags;
 	int ret = 0;
 	struct clk_core *old_parent;
 
-	old_parent = __clk_set_parent_before(core, parent);
+	old_parent = __clk_set_parent_before(core, parent, &mig);
 
 	trace_clk_set_parent(core, parent);
 
@@ -2249,12 +2279,12 @@ static int __clk_set_parent(struct clk_core *core, struct clk_core *parent,
 		clk_reparent(core, old_parent);
 		clk_enable_unlock(flags);
 
-		__clk_set_parent_after(core, old_parent, parent);
+		__clk_set_parent_after(core, old_parent, parent, &mig);
 
 		return ret;
 	}
 
-	__clk_set_parent_after(core, parent, old_parent);
+	__clk_set_parent_after(core, parent, old_parent, &mig);
 
 	return 0;
 }
@@ -2481,7 +2511,10 @@ static void clk_change_rate(struct clk_core *core)
 	}
 
 	if (core->new_parent && core->new_parent != core->parent) {
-		old_parent = __clk_set_parent_before(core, core->new_parent);
+		struct clk_parent_migration mig;
+
+		old_parent = __clk_set_parent_before(core, core->new_parent,
+						     &mig);
 		trace_clk_set_parent(core, core->new_parent);
 
 		if (core->ops->set_rate_and_parent) {
@@ -2494,7 +2527,8 @@ static void clk_change_rate(struct clk_core *core)
 		}
 
 		trace_clk_set_parent_complete(core, core->new_parent);
-		__clk_set_parent_after(core, core->new_parent, old_parent);
+		__clk_set_parent_after(core, core->new_parent, old_parent,
+				       &mig);
 	}
 
 	if (core->flags & CLK_OPS_PARENT_ENABLE)
@@ -3941,9 +3975,11 @@ static void clk_core_reparent_orphans_nolock(void)
 		 * are enabled during init but might not have a parent yet.
 		 */
 		if (parent) {
+			struct clk_parent_migration mig;
+
 			/* update the clk tree topology */
-			__clk_set_parent_before(orphan, parent);
-			__clk_set_parent_after(orphan, parent, NULL);
+			__clk_set_parent_before(orphan, parent, &mig);
+			__clk_set_parent_after(orphan, parent, NULL, &mig);
 			__clk_recalc_accuracies(orphan);
 			__clk_recalc_rates(orphan, true, 0);
 

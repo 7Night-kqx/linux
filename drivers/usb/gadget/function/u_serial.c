@@ -82,7 +82,8 @@
  */
 #define QUEUE_SIZE		16
 #define WRITE_BUF_SIZE		8192		/* TX only */
-#define GS_CONSOLE_BUF_SIZE	8192
+#define GS_CONSOLE_BUF_SIZE	8192		/* default, see console_buf_size */
+#define GS_CONSOLE_REQ_SIZE	4096		/* drained per USB request */
 
 /* Prevents race conditions while accessing gser->ioport */
 static DEFINE_SPINLOCK(serial_port_lock);
@@ -927,6 +928,19 @@ static struct tty_driver *gs_tty_driver;
 
 #ifdef CONFIG_U_SERIAL_CONSOLE
 
+/*
+ * Console output is buffered here until the USB link drains it, and that
+ * drain runs from a workqueue.  A printk() burst which keeps the CPU to
+ * itself -- a boot-time burst on a uniprocessor, say -- therefore overruns
+ * the buffer long before any of it can be sent, and everything past the end
+ * is dropped.  Size it for the largest burst that has to survive.  Only
+ * consoles enabled afterwards pick up a new value, and kfifo_alloc() rounds
+ * it up to a power of two.
+ */
+static unsigned int console_buf_size = GS_CONSOLE_BUF_SIZE;
+module_param(console_buf_size, uint, 0644);
+MODULE_PARM_DESC(console_buf_size, "bytes of console output buffered per port");
+
 static void gs_console_complete_out(struct usb_ep *ep, struct usb_request *req)
 {
 	struct gs_console *cons = req->context;
@@ -955,7 +969,9 @@ static void __gs_console_push(struct gs_console *cons)
 {
 	struct usb_request *req = cons->req;
 	struct usb_ep *ep;
-	size_t size;
+	char *buf;
+	size_t missed, size, off = 0;
+	int status;
 
 	if (!req)
 		return;	/* disconnected */
@@ -963,26 +979,38 @@ static void __gs_console_push(struct gs_console *cons)
 	if (req->length)
 		return;	/* busy */
 
-	ep = cons->console.data;
-	size = kfifo_out(&cons->buf, req->buf, ep->maxpacket);
-	if (!size)
-		return;
+	buf = req->buf;
 
-	if (cons->missed && ep->maxpacket >= 64) {
-		char buf[64];
-		size_t len;
-
-		len = sprintf(buf, "\n[missed %zu bytes]\n", cons->missed);
-		kfifo_in(&cons->buf, buf, len);
+	/*
+	 * Report the loss ahead of the output that survived it, and out of
+	 * this buffer rather than the fifo: pushing the marker back into the
+	 * fifo queued it behind a bufferful of older output, and dropped it
+	 * outright whenever the fifo was still full -- which is exactly when
+	 * it matters.
+	 */
+	missed = cons->missed;
+	if (missed) {
+		off = sprintf(buf, "\n[missed %zu bytes]\n", missed);
 		cons->missed = 0;
 	}
 
-	req->length = size;
+	ep = cons->console.data;
+	size = kfifo_out(&cons->buf, buf + off, GS_CONSOLE_REQ_SIZE - off);
+	if (!size && !off)
+		return;
+
+	req->length = off + size;
+	req->zero = kfifo_is_empty(&cons->buf);
 
 	spin_unlock_irq(&cons->lock);
-	if (usb_ep_queue(ep, req, GFP_ATOMIC))
-		req->length = 0;
+	status = usb_ep_queue(ep, req, GFP_ATOMIC);
 	spin_lock_irq(&cons->lock);
+
+	if (status) {
+		req->length = 0;
+		/* the request never left, so none of it was reported */
+		cons->missed += missed + size;
+	}
 }
 
 static void gs_console_work(struct work_struct *work)
@@ -1031,7 +1059,7 @@ static int gs_console_connect(struct gs_port *port)
 		return 0;
 
 	ep = port->port_usb->in;
-	req = gs_alloc_req(ep, ep->maxpacket, GFP_ATOMIC);
+	req = gs_alloc_req(ep, GS_CONSOLE_REQ_SIZE, GFP_ATOMIC);
 	if (!req)
 		return -ENOMEM;
 	req->complete = gs_console_complete_out;
@@ -1095,7 +1123,7 @@ static int gs_console_init(struct gs_port *port)
 	INIT_WORK(&cons->work, gs_console_work);
 	spin_lock_init(&cons->lock);
 
-	err = kfifo_alloc(&cons->buf, GS_CONSOLE_BUF_SIZE, GFP_KERNEL);
+	err = kfifo_alloc(&cons->buf, max(console_buf_size, 1024U), GFP_KERNEL);
 	if (err) {
 		pr_err("ttyGS%d: allocate console buffer failed\n", port->port_num);
 		kfree(cons);
