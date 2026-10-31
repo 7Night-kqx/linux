@@ -2477,6 +2477,139 @@ endmenu # "Kernel Features"
 
 menu "Boot options"
 
+config ARM64_BUILTIN_DTB
+	bool "Embed a selected Device Tree Blob in the arm64 kernel"
+	depends on OF
+	select GENERIC_BUILTIN_DTB
+	help
+	  Embed one arm64 Device Tree Blob in vmlinux. This is useful for
+	  bring-up paths where the bootloader cannot pass a separate DTB.
+
+config BUILTIN_DTB_NAME
+	string "Built-in DTB path"
+	depends on ARM64_BUILTIN_DTB
+	help
+	  Path to the DTB relative to arch/arm64/boot/dts, for example
+	  qcom/sm8750-xiaomi-dada.
+
+config ARM64_BUILTIN_DTB_FORCE
+	bool "Prefer the built-in DTB over the one supplied by the bootloader"
+	depends on ARM64_BUILTIN_DTB
+	help
+	  arm64 normally has no built-in DTB boot path at all: setup_arch()
+	  always calls setup_machine_fdt(__fdt_pointer) with the blob the
+	  bootloader put in x0, and CONFIG_ARM64_BUILTIN_DTB alone only makes
+	  the blob dead weight inside vmlinux.
+
+	  Say Y to make setup_machine_fdt() use __dtb_start instead whenever
+	  it contains a valid FDT. This is for bring-up on devices whose
+	  bootloader hands over a vendor DTB that the mainline kernel cannot
+	  use, and where there is no way to replace it (for example an Android
+	  ABL that always loads the DTB from the vendor_boot partition).
+
+	  The built-in DTB must then carry everything the bootloader FDT used
+	  to provide: a /memory node, /chosen bootargs, and any reserved
+	  regions. The bootloader initrd pointers are discarded, so use
+	  CONFIG_INITRAMFS_SOURCE for the root filesystem.
+
+	  If unsure, say N.
+
+config ARM64_BOOT_BEACON
+	bool "Write an early boot beacon into a fixed physical address"
+	help
+	  Hand-write a pstore/ramoops compatible record into a fixed physical
+	  address at several points during early boot, before any console,
+	  driver or filesystem is available.
+
+	  This exists for headless bring-up: on a device with no accessible
+	  UART, no usable framebuffer and no /dev/mem in the stock kernel,
+	  the ramoops region is the only channel that survives a reset, so a
+	  previously booted kernel can be asked what the new kernel reached.
+
+	  The record uses the persistent_ram_buffer layout, so the same region
+	  declared as a ramoops zone is readable through /sys/fs/pstore after
+	  the next boot.
+
+	  If unsure, say N.
+
+config ARM64_BOOT_BEACON_ADDR
+	hex "Physical address of the early boot beacon"
+	depends on ARM64_BOOT_BEACON
+	default 0xa3700000
+	help
+	  Physical address of a ramoops zone that the previously running
+	  kernel will read back. It must be RAM that is not cleared by a
+	  warm reset and not used by the bootloader.
+
+config ARM64_BOOT_BEACON_SIZE
+	hex "Size of the early boot beacon zone"
+	depends on ARM64_BOOT_BEACON
+	default 0x200000
+	help
+	  Size of the ramoops zone at CONFIG_ARM64_BOOT_BEACON_ADDR. Only the
+	  first few hundred bytes are written; the size is used to keep the
+	  record inside the zone.
+
+config ARM64_BOOT_BEACON_STRIDE
+	int "Byte stride between copies of the beacon text"
+	depends on ARM64_BOOT_BEACON
+	range 256 32768
+	default 2039
+	help
+	  Write the beacon text over and over at this stride until the 64 KB
+	  the beacon advertises is full, so a reader can merge the copies.
+
+	  This is for regions that lose bits across a reset. On this hardware
+	  about 30% of set bits go 1 -> 0 per reset and about 0.6% of zero bits
+	  go 0 -> 1, so the reader counts how many copies carry each bit rather
+	  than OR-ing them: over 32 copies a true 1 lands near 22 and a true 0
+	  near 0.2, which separates them decisively.
+
+	  Keep this odd. If the 0 -> 1 flips are a fixed property of a physical
+	  cell rather than an event -- true cells and anti-cells alternate in a
+	  DRAM array, so in half the positions a stored 0 is a charged capacitor
+	  that decays toward 1 -- then a stride sharing a factor with the array's
+	  column period puts every copy on the same phase of the same pattern
+	  and no vote can remove them. An odd stride gives each copy a different
+	  phase. work/test-decode-beacon.py models both cases: at 2048 the
+	  cell-fixed one loses two lines and three characters of the panic text
+	  at every threshold, at 2039 both recover the text exactly.
+
+	  This number bounds one copy, so it has to exceed everything the beacon
+	  can print in one boot -- about 950 bytes once round E's panic and die
+	  lines are counted. 2039 leaves headroom and divides the advertised
+	  0xfff0 bytes into 32 copies.
+
+	  The reader must be told this number rather than dividing the record
+	  length by a copy count, because the length comes from the size field
+	  and that field decays too. See work/decode-beacon.py --stride.
+
+	  If unsure, say 2048.
+
+config ARM64_BOOT_BEACON_PANIC_EXIT
+	bool "Leave the probe kernel through panic() rather than a clean reset"
+	depends on ARM64_BOOT_BEACON
+	help
+	  Panic at the end of kernel_restart(), after userspace has asked for the
+	  reboot and after everything this kernel had to say is in the beacon.
+
+	  This is for devices whose bootloader archives the ramoops region to
+	  flash when a boot ends abnormally. On the phone this was written for,
+	  the vendor bootmonitor writes the raw persistent_ram zones to a
+	  `blackbox` partition on an abnormal exit and not on a clean one; the one
+	  probe round that panicked is still readable off flash with no bit decay
+	  at all, while the rounds that returned cleanly were never captured.
+
+	  Flash does not decay in the seconds between the reset and the harvest,
+	  which is where roughly 31% of this region's set bits go. So for a
+	  bring-up kernel whose only product is its log, panicking is the more
+	  reliable exit.
+
+	  panic_timeout must be non-zero or the device stops and needs a physical
+	  reset; the code forces it to 5 if the cmdline did not set it.
+
+	  If unsure, say N.
+
 config ARM64_ACPI_PARKING_PROTOCOL
 	bool "Enable support for the ARM64 ACPI parking protocol"
 	depends on ACPI
