@@ -1,0 +1,81 @@
+config XM_POWER_SUPPLY
+	tristate "Xiaomi MCA power supply framework"
+	depends on OF_GPIO && GPIOLIB_LEGACY
+	help
+	  Xiaomi Multi Charge Architecture (MCA) power-supply framework.
+
+if XM_POWER_SUPPLY
+
+config MCA_DADA_KERNEL_AUTH
+	bool "Xiaomi dada automatic battery authentication"
+	depends on XM_POWER_SUPPLY=y && MCA_EXTERNAL_FG=y
+	select CRYPTO_LIB_SHA256
+	select CRYPTO_LIB_UTILS
+	help
+	  Verify two fresh HMAC-SHA256 gauge challenges asynchronously after
+	  the charging framework is ready. Matching profile data must be
+	  generated at build time. Errors retain unauthenticated limits.
+	  No userspace authentication service is required.
+
+# Protocol layer
+config MCA_PROTOCOL_PD
+	tristate "MCA USB Power Delivery protocol support"
+
+config MCA_PROTOCOL_QC
+	tristate "MCA Qualcomm QuickCharge protocol support"
+
+# External hardware IC drivers
+config MCA_EXTERNAL_FG
+	tristate "MCA external fuel gauge IC support"
+
+config MCA_EXTERNAL_CP
+	tristate "MCA external charge pump IC support"
+
+config MCA_EXTERNAL_CP_SC8541
+	tristate "MCA SC8541 charge pump IC support"
+
+config MCA_EXTERNAL_WIRELESS
+	tristate "MCA external wireless charging IC support"
+
+config MCA_EXTERNAL_WIRELESS_SC96281
+	tristate "MCA SC96281 wireless charging IC support"
+
+config MCA_EXTERNAL_LOADSWITCH
+	tristate "MCA external load switch IC support"
+
+config MCA_EXTERNAL_BOOST
+	tristate "MCA external boost IC support"
+
+# Qualcomm platform glue
+config MCA_QCOM_SUBPMIC
+	tristate "MCA Qualcomm sub-PMIC proxy support"
+
+config MCA_QCOM_ADSP
+	tristate "MCA Qualcomm ADSP glink support"
+	depends on QCOM_PMIC_GLINK && !BATTERY_QCOM_BATTMGR
+	select AUXILIARY_BUS
+
+config MCA_QCOM_SYSFS
+	tristate "MCA Qualcomm sysfs support"
+
+config MCA_QCOM_SMEM
+	tristate "MCA Qualcomm shared memory support"
+
+config MCA_QCOM_PANEL
+	tristate "MCA Qualcomm panel notifier support"
+
+# Shared memory
+config CHARGER_PARTITION
+	tristate "MCA charger partition (shared-memory charging state)"
+	default XM_POWER_SUPPLY
+	help
+	  Shared-memory charging state exchanged between LK/UEFI/ABL/ADSP,
+	  the kernel and the charging HAL. Core MCA component referenced
+	  unconditionally by the business/strategy layers; keep enabled with
+	  the framework.
+
+# Test
+config MCA_UT_TEST
+	tristate "MCA unit test module"
+
+endif # XM_POWER_SUPPLY

@@ -123,6 +123,11 @@ struct qcom_pas {
 
 	struct qcom_pas_context *pas_ctx;
 	struct qcom_pas_context *dtb_pas_ctx;
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+	struct delayed_work dada_boot_work;
+	unsigned int dada_boot_attempts;
+	bool dada_boot_stopping;
+#endif
 };
 
 static void qcom_pas_segment_dump(struct rproc *rproc,
@@ -818,6 +823,69 @@ static void qcom_pas_unassign_memory_region(struct qcom_pas *pas)
 	}
 }
 
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+static bool qcom_pas_dada_adsp(struct device *dev)
+{
+	return of_machine_is_compatible("xiaomi,dada") &&
+		of_device_is_compatible(dev->of_node, "qcom,sm8750-adsp-pas");
+}
+
+static void qcom_pas_dada_boot_work(struct work_struct *work)
+{
+	struct qcom_pas *pas = container_of(work, struct qcom_pas,
+					  dada_boot_work.work);
+	const struct firmware *fw;
+	int ret;
+
+	if (READ_ONCE(pas->dada_boot_stopping))
+		return;
+	if (system_state != SYSTEM_RUNNING)
+		goto retry;
+	/* Built-in drivers may probe before the Linux rootfs exposes firmware.
+	 * Check both files in a delayed worker rather than blocking probe.
+	 */
+	ret = request_firmware_direct(&fw, pas->rproc->firmware, pas->dev);
+	if (ret)
+		goto firmware_error;
+	release_firmware(fw);
+	if (pas->dtb_firmware_name) {
+		ret = request_firmware_direct(&fw, pas->dtb_firmware_name, pas->dev);
+		if (ret)
+			goto firmware_error;
+		release_firmware(fw);
+	}
+	if (READ_ONCE(pas->dada_boot_stopping))
+		return;
+	ret = rproc_boot(pas->rproc);
+	if (ret)
+		dev_err(pas->dev, "dada delayed ADSP boot failed: %d\n", ret);
+	else
+		dev_info(pas->dev, "dada delayed ADSP boot succeeded\n");
+	return;
+firmware_error:
+	if (ret != -ENOENT && ret != -EAGAIN) {
+		dev_err(pas->dev, "dada ADSP firmware unavailable: %d\n", ret);
+		return;
+	}
+retry:
+	if (++pas->dada_boot_attempts >= 90) {
+		dev_err(pas->dev, "dada ADSP firmware readiness timed out\n");
+		return;
+	}
+	if (!READ_ONCE(pas->dada_boot_stopping))
+		queue_delayed_work(system_freezable_wq, &pas->dada_boot_work,
+				   msecs_to_jiffies(1000));
+}
+
+static void qcom_pas_dada_boot_cleanup(void *data)
+{
+	struct qcom_pas *pas = data;
+
+	WRITE_ONCE(pas->dada_boot_stopping, true);
+	cancel_delayed_work_sync(&pas->dada_boot_work);
+}
+#endif
+
 static int qcom_pas_probe(struct platform_device *pdev)
 {
 	const struct qcom_pas_data *desc;
@@ -861,6 +929,10 @@ static int qcom_pas_probe(struct platform_device *pdev)
 
 	rproc->has_iommu = of_property_present(pdev->dev.of_node, "iommus");
 	rproc->auto_boot = desc->auto_boot;
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+	if (qcom_pas_dada_adsp(&pdev->dev))
+		rproc->auto_boot = false;
+#endif
 	rproc_coredump_set_elf_info(rproc, ELFCLASS32, EM_NONE);
 
 	pas = rproc->priv;
@@ -882,6 +954,14 @@ static int qcom_pas_probe(struct platform_device *pdev)
 		pas->dtb_pas_id = desc->dtb_pas_id;
 	}
 	platform_set_drvdata(pdev, pas);
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+	if (qcom_pas_dada_adsp(pas->dev)) {
+		INIT_DELAYED_WORK(&pas->dada_boot_work, qcom_pas_dada_boot_work);
+		ret = devm_add_action_or_reset(pas->dev, qcom_pas_dada_boot_cleanup, pas);
+		if (ret)
+			return ret;
+	}
+#endif
 
 	ret = device_init_wakeup(pas->dev, true);
 	if (ret)
@@ -938,6 +1018,13 @@ static int qcom_pas_probe(struct platform_device *pdev)
 	node = of_get_compatible_child(pdev->dev.of_node, "qcom,bam-dmux");
 	pas->bam_dmux = of_platform_device_create(node, NULL, &pdev->dev);
 	of_node_put(node);
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+	if (qcom_pas_dada_adsp(pas->dev)) {
+		queue_delayed_work(system_freezable_wq, &pas->dada_boot_work,
+				   msecs_to_jiffies(15000));
+		dev_info(pas->dev, "dada ADSP boot deferred until firmware is available\n");
+	}
+#endif
 
 	return 0;
 
@@ -963,6 +1050,10 @@ static void qcom_pas_remove(struct platform_device *pdev)
 {
 	struct qcom_pas *pas = platform_get_drvdata(pdev);
 
+#if IS_ENABLED(CONFIG_MCA_DADA_KERNEL_AUTH)
+	if (qcom_pas_dada_adsp(pas->dev))
+		qcom_pas_dada_boot_cleanup(pas);
+#endif
 	if (pas->bam_dmux)
 		of_platform_device_destroy(&pas->bam_dmux->dev, NULL);
 
@@ -1905,6 +1996,13 @@ static const struct of_device_id qcom_pas_of_match[] = {
 	{ .compatible = "qcom,sm8650-adsp-pas", .data = &sm8550_adsp_resource },
 	{ .compatible = "qcom,sm8650-cdsp-pas", .data = &sm8650_cdsp_resource },
 	{ .compatible = "qcom,sm8650-mpss-pas", .data = &sm8650_mpss_resource },
+	/*
+	 * sm8750-adsp-pas was missing from the table: the DT compatible[0] is
+	 * "qcom,sm8750-adsp-pas", so MODULE_DEVICE_TABLE never generated the
+	 * udev alias and the =m loader was not auto-loaded (probe only worked
+	 * via the secondary "qcom,sm8550-adsp-pas" compatible when builtin).
+	 */
+	{ .compatible = "qcom,sm8750-adsp-pas", .data = &sm8550_adsp_resource },
 	{ .compatible = "qcom,sm8750-mpss-pas", .data = &sm8750_mpss_resource },
 	{ .compatible = "qcom,x1e80100-adsp-pas", .data = &x1e80100_adsp_resource },
 	{ .compatible = "qcom,x1e80100-cdsp-pas", .data = &x1e80100_cdsp_resource },

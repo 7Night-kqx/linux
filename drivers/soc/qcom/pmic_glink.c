@@ -73,7 +73,7 @@ static void _devm_pmic_glink_release_client(struct device *dev, void *res)
 	unsigned long flags;
 
 	spin_lock_irqsave(&pg->client_lock, flags);
-	list_del(&client->node);
+	list_del_init(&client->node);
 	spin_unlock_irqrestore(&pg->client_lock, flags);
 }
 
@@ -117,6 +117,21 @@ void pmic_glink_client_register(struct pmic_glink_client *client)
 	spin_unlock_irqrestore(&pg->client_lock, flags);
 }
 EXPORT_SYMBOL_GPL(pmic_glink_client_register);
+
+/* After return, neither message nor PDR dispatch can reference this client.
+ * Storage remains devres-owned and is released after the consumer's remove.
+ */
+void pmic_glink_client_unregister(struct pmic_glink_client *client)
+{
+	struct pmic_glink *pg = client->pg;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pg->client_lock, flags);
+	list_del_init(&client->node);
+	spin_unlock_irqrestore(&pg->client_lock, flags);
+}
+EXPORT_SYMBOL_GPL(pmic_glink_client_unregister);
+
 
 int pmic_glink_send(struct pmic_glink_client *client, void *data, size_t len)
 {
@@ -238,6 +253,8 @@ static void pmic_glink_pdr_callback(int state, char *svc_path, void *priv)
 	struct pmic_glink *pg = priv;
 
 	guard(mutex)(&pg->state_lock);
+	dev_info(pg->dev, "PDR callback: state=%d svc=%s ept=%d client_state=%d\n",
+		 state, svc_path ? svc_path : "(null)", !!pg->ept, pg->client_state);
 	pg->pdr_state = state;
 
 	pmic_glink_state_notify_clients(pg);

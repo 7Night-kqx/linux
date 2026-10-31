@@ -1202,4 +1202,6 @@ config MACSMC_POWER
 
 	  Say Y or M here if you have an Apple Silicon based Mac.
 
+source "drivers/power/supply/mca/Kconfig"
+
 endif # POWER_SUPPLY

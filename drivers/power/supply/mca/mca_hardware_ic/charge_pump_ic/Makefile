@@ -1,0 +1,2 @@
+obj-$(CONFIG_XM_POWER_SUPPLY)	+= sc8541/
+obj-$(CONFIG_XM_POWER_SUPPLY)	+= sc8581/
