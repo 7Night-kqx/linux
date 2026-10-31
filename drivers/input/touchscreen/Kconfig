@@ -1415,3 +1415,14 @@ config TOUCHSCREEN_HIMAX_HX83112B
 	  module will be called himax_hx83112b.
 
 endif
+
+config TOUCHSCREEN_SYNAPTICS_TCM
+	tristate "Synaptics TouchComm based touchscreens (SPI)"
+	depends on SPI && INPUT && INPUT_TOUCHSCREEN
+	help
+	  Say Y here if you have a Synaptics TouchComm based touchscreen
+	  connected over SPI. This is the mainline port of the vendor
+	  synaptics_tcm driver (Xiaomi dada, round CN): protocol core v2,
+	  SPI transport, input device via the MT protocol B slots.
+
+	  If unsure, say N.
