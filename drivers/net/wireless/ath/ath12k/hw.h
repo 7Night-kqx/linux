@@ -97,7 +97,10 @@ struct ieee80211_rx_status;
 #define ATH12K_AMSS_FILE		"amss.bin"
 #define ATH12K_M3_FILE			"m3.bin"
 #define ATH12K_AUX_UC_FILE		"aux_ucode.bin"
+#define ATH12K_TME_PATCH_FILE		"tme_patch.bin"
 #define ATH12K_REGDB_FILE_NAME		"regdb.bin"
+#define ATH12K_QDSS_TRACE_CONFIG_FILE	"qdss_trace_config_v2.cfg"
+#define ATH12K_QDSS_TRACE_CONFIG_PERF_FILE "qdss_trace_config_perf_v2.cfg"
 
 #define ATH12K_PCIE_MAX_PAYLOAD_SIZE	128
 
@@ -161,6 +164,7 @@ struct ath12k_hw_params {
 		size_t cal_offset;
 		enum ath12k_m3_fw_loaders m3_loader;
 		bool download_aux_ucode:1;
+		bool download_tme_patch:1;
 	} fw;
 
 	u8 max_radios;

@@ -30,6 +30,9 @@
 #define QMI_WLFW_REQUEST_MEM_IND_V01		0x0035
 #define QMI_WLFW_FW_MEM_READY_IND_V01		0x0037
 #define QMI_WLFW_FW_READY_IND_V01		0x0038
+/* Vendor cnss maps 0x0021 to COLD_BOOT_CAL_DONE (Helium), not FW_READY.
+ * 0x0038 (FW_INIT_DONE) is the real FW_READY for host bring-up. */
+#define QMI_WLFW_VENDOR_FW_READY_IND_V01	0x0021
 
 #define QMI_WLANFW_MAX_DATA_SIZE_V01		6144
 
@@ -109,6 +112,7 @@ struct target_info {
 	u32 soc_id;
 	u32 fw_version;
 	u32 eeprom_caldata;
+	u64 fw_caps;
 	char fw_build_timestamp[ATH12K_QMI_WLANFW_MAX_TIMESTAMP_LEN_V01 + 1];
 	char fw_build_id[ATH12K_QMI_WLANFW_MAX_BUILD_ID_LEN_V01 + 1];
 	char bdf_ext[ATH12K_QMI_BDF_EXT_STR_LENGTH];
@@ -150,6 +154,8 @@ struct ath12k_qmi {
 	struct target_info target;
 	struct m3_mem_region m3_mem;
 	struct m3_mem_region aux_uc_mem;
+	struct m3_mem_region tme_mem;
+	struct m3_mem_region sku_mem;
 	unsigned int service_ins_id;
 	struct dev_mem_info dev_mem[ATH12K_QMI_WLFW_MAX_DEV_MEM_NUM_V01];
 	u8 dynamic_ddr_support;
@@ -196,6 +202,7 @@ struct wlfw_host_mlo_chip_info_s_v01 {
 
 enum ath12k_qmi_cnss_feature {
 	CNSS_FEATURE_MIN_ENUM_VAL_V01 = INT_MIN,
+	CNSS_WLAN_EN_SUPPORT_V01 = 2,
 	CNSS_QDSS_CFG_MISS_V01 = 3,
 	CNSS_PCIE_PERST_NO_PULL_V01 = 4,
 	CNSS_AUX_UC_SUPPORT_V01 = 6,
@@ -523,6 +530,107 @@ struct qmi_wlanfw_m3_info_req_msg_v01 {
 };
 
 struct qmi_wlanfw_m3_info_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+/* Firmware capability bits reported in the target cap response (fw_caps). */
+#define QMI_WLANFW_FW_CAP_HOST_PCIE_GEN_SWITCH	BIT(0)
+#define QMI_WLANFW_FW_CAP_AUX_UC_SUPPORT	BIT(2)
+
+enum ath12k_qmi_pcie_gen_speed {
+	ATH12K_QMI_PCIE_GEN_SPEED_INVALID = 0,
+	ATH12K_QMI_PCIE_GEN_SPEED_1 = 1,
+	ATH12K_QMI_PCIE_GEN_SPEED_2 = 2,
+	ATH12K_QMI_PCIE_GEN_SPEED_3 = 3,
+};
+
+#define QMI_WLANFW_QDSS_TRACE_CONFIG_DOWNLOAD_REQ_V01	0x0044
+#define QMI_WLANFW_QDSS_TRACE_CONFIG_DOWNLOAD_REQ_MSG_V01_MAX_MSG_LEN 6167
+
+struct qmi_wlanfw_qdss_trace_config_download_req_msg_v01 {
+	u8 total_size_valid;
+	u32 total_size;
+	u8 seg_id_valid;
+	u32 seg_id;
+	u8 data_valid;
+	u32 data_len;
+	u8 data[QMI_WLANFW_MAX_DATA_SIZE_V01];
+	u8 end_valid;
+	u8 end;
+};
+
+struct qmi_wlanfw_qdss_trace_config_download_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+#define QMI_WLANFW_PCIE_GEN_SWITCH_REQ_V01		0x0053
+#define QMI_WLANFW_PCIE_GEN_SWITCH_REQ_MSG_V01_MAX_MSG_LEN	7
+
+struct qmi_wlanfw_pcie_gen_switch_req_msg_v01 {
+	enum ath12k_qmi_pcie_gen_speed pcie_speed;
+};
+
+struct qmi_wlanfw_pcie_gen_switch_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+#define QMI_WLANFW_SUBSYS_RESTART_LEVEL_REQ_V01	0x0055
+#define QMI_WLANFW_SUBSYS_RESTART_LEVEL_REQ_MSG_V01_MAX_MSG_LEN 4
+
+struct qmi_wlanfw_subsys_restart_level_req_msg_v01 {
+	u8 restart_level_type_valid;
+	u8 restart_level_type;
+};
+
+struct qmi_wlanfw_subsys_restart_level_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+#define QMI_WLANFW_SOFT_SKU_INFO_REQ_V01		0x0060
+#define QMI_WLANFW_SOFT_SKU_INFO_REQ_MSG_V01_MAX_MSG_LEN	18
+
+struct qmi_wlanfw_soft_sku_info_req_msg_v01 {
+	u64 addr;
+	u32 size;
+};
+
+struct qmi_wlanfw_soft_sku_info_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+#define QMI_WLFW_MAC_ADDR_SIZE_V01			6
+#define QMI_WLANFW_MAC_ADDR_REQ_V01			0x0033
+#define QMI_WLANFW_MAC_ADDR_REQ_MSG_V01_MAX_MSG_LEN	9
+
+struct qmi_wlanfw_mac_addr_req_msg_v01 {
+	u8 mac_addr_valid;
+	u8 mac_addr[QMI_WLFW_MAC_ADDR_SIZE_V01];
+};
+
+struct qmi_wlanfw_mac_addr_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+};
+
+/*
+ * TME-L (Trust Management Engine Lite) patch, needed by WCN7880 before it
+ * accepts the board file. Layout and message id taken from the vendor
+ * wlan_firmware_service module (wlfw_tme_lite_info_req_msg_v01).
+ */
+#define QMI_WLANFW_TME_LITE_INFO_REQ_MSG_V01_MAX_MSG_LEN	25
+#define QMI_WLANFW_TME_LITE_INFO_REQ_V01	0x005B
+
+enum qmi_wlanfw_tme_lite_file_v01 {
+	QMI_WLANFW_TME_LITE_PATCH_FILE_V01 = 0,
+	QMI_WLANFW_TME_LITE_OEM_FUSE_FILE_V01 = 1,
+};
+
+struct qmi_wlanfw_tme_lite_info_req_msg_v01 {
+	u32 tme_file;
+	u64 addr;
+	u32 size;
+};
+
+struct qmi_wlanfw_tme_lite_info_resp_msg_v01 {
 	struct qmi_response_type_v01 resp;
 };
 

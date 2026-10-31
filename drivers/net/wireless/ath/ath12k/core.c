@@ -35,6 +35,16 @@ module_param_named(ftm_mode, ath12k_ftm_mode, bool, 0444);
 MODULE_PARM_DESC(ftm_mode, "Boots up in factory test mode");
 EXPORT_SYMBOL(ath12k_ftm_mode);
 
+int ath12k_pcie_gen_speed = -1;
+module_param_named(pcie_gen_speed, ath12k_pcie_gen_speed, int, 0444);
+MODULE_PARM_DESC(pcie_gen_speed, "PCIe gen speed to request from FW (-1 = skip, like cnss2 cold boot)");
+EXPORT_SYMBOL(ath12k_pcie_gen_speed);
+
+char ath12k_mac_addr[18] = "CE:76:4A:AB:26:35";
+module_param_string(mac_addr, ath12k_mac_addr, sizeof(ath12k_mac_addr), 0444);
+MODULE_PARM_DESC(mac_addr, "WLAN MAC address to provision to FW via QMI (dms_mac)");
+EXPORT_SYMBOL(ath12k_mac_addr);
+
 /* protected with ath12k_hw_group_mutex */
 static struct list_head ath12k_hw_group_list = LIST_HEAD_INIT(ath12k_hw_group_list);
 
@@ -1666,6 +1676,11 @@ static void ath12k_core_reset(struct work_struct *work)
 
 	if (!(test_bit(ATH12K_FLAG_QMI_FW_READY_COMPLETE, &ab->dev_flags))) {
 		ath12k_warn(ab, "ignore reset dev flags 0x%lx\n", ab->dev_flags);
+		/* Firmware crashed during bring-up: still grab the RDDM so the
+		 * assert reason can be inspected via devcoredump.
+		 */
+		if (test_bit(ATH12K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+			ath12k_coredump_collect(ab);
 		return;
 	}
 

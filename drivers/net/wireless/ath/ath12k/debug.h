@@ -39,6 +39,8 @@ __printf(2, 3) void __ath12k_warn(struct device *dev, const char *fmt, ...);
 
 extern unsigned int ath12k_debug_mask;
 extern bool ath12k_ftm_mode;
+extern int ath12k_pcie_gen_speed;
+extern char ath12k_mac_addr[18];
 
 #ifdef CONFIG_ATH12K_DEBUG
 __printf(3, 4) void __ath12k_dbg(struct ath12k_base *ab,
