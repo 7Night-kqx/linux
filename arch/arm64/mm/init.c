@@ -22,6 +22,7 @@
 #include <linux/sort.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
+#include <linux/libfdt.h>
 #include <linux/dma-direct.h>
 #include <linux/dma-map-ops.h>
 #include <linux/efi.h>
@@ -36,6 +37,7 @@
 #include <linux/execmem.h>
 
 #include <asm/boot.h>
+#include <asm/boot-beacon.h>
 #include <asm/fixmap.h>
 #include <asm/hypervisor.h>
 #include <asm/kasan.h>

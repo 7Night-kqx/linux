@@ -677,6 +677,38 @@ static void __init fdt_init_reserved_mem_node(unsigned long node, const char *un
 	reserved_mem_count++;
 }
 
+/**
+ * of_reserved_mem_rebase_names() - follow a relocated flat device tree
+ * @from: address the blob was parsed at
+ * @to: address it now lives at
+ * @size: blob size in bytes
+ *
+ * fdt_init_reserved_mem_node() keeps @uname, a pointer into the flat
+ * blob, as rmem->name. On arm64 that blob is .dtb.init.rodata, which
+ * free_initmem() unmaps, so anything still pointing at it faults. A
+ * caller that copies the blob byte-for-byte can call this to move the
+ * names along with it; because the copy is identical the offsets are
+ * unchanged and the rebase is exact.
+ *
+ * Returns the number of names rebased.
+ */
+int of_reserved_mem_rebase_names(const void *from, const void *to,
+				 unsigned long size)
+{
+	const char *base = from;
+	int i, n = 0;
+
+	for (i = 0; i < reserved_mem_count; i++) {
+		const char *name = reserved_mem[i].name;
+
+		if (name >= base && name < base + size) {
+			reserved_mem[i].name = (const char *)to + (name - base);
+			n++;
+		}
+	}
+	return n;
+}
+
 struct rmem_assigned_device {
 	struct device *dev;
 	struct reserved_mem *rmem;

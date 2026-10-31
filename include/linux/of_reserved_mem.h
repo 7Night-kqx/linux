@@ -49,6 +49,15 @@ int of_reserved_mem_region_to_resource_byname(const struct device_node *np,
 					      const char *name, struct resource *res);
 int of_reserved_mem_region_count(const struct device_node *np);
 
+/*
+ * Round I (local bring-up). fdt_init_reserved_mem_node() stores uname
+ * straight from the flat blob, so every rmem->name aliases it. When the
+ * blob is relocated byte-for-byte, rebase those names by the same delta.
+ * Returns how many were rebased.
+ */
+int of_reserved_mem_rebase_names(const void *from, const void *to,
+				 unsigned long size);
+
 #else
 
 #define RESERVEDMEM_OF_DECLARE(name, compat, ops)			\
@@ -95,6 +104,13 @@ static inline int of_reserved_mem_region_to_resource_byname(const struct device_
 }
 
 static inline int of_reserved_mem_region_count(const struct device_node *np)
+{
+	return 0;
+}
+
+static inline int of_reserved_mem_rebase_names(const void *from,
+					       const void *to,
+					       unsigned long size)
 {
 	return 0;
 }

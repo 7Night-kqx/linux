@@ -27,6 +27,9 @@
 #include <linux/proc_fs.h>
 #include <linux/memblock.h>
 #include <linux/of_fdt.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/log2.h>
+#include <linux/libfdt.h>
 #include <linux/efi.h>
 #include <linux/psci.h>
 #include <linux/sched/task.h>
@@ -34,6 +37,7 @@
 #include <linux/mm.h>
 
 #include <asm/acpi.h>
+#include <asm/boot-beacon.h>
 #include <asm/fixmap.h>
 #include <asm/cpu.h>
 #include <asm/cputype.h>
@@ -167,14 +171,64 @@ static void __init smp_build_mpidr_hash(void)
 		pr_warn("Large number of MPIDR hash buckets detected\n");
 }
 
+#ifdef CONFIG_ARM64_BUILTIN_DTB_FORCE
+/*
+ * Return the FDT embedded in vmlinux, or NULL when there is not a usable one.
+ *
+ * KERNEL_DTB() puts __dtb_start at the head of .dtb.init.rodata and the
+ * wrapper aligns every blob to STRUCT_ALIGNMENT, so the first blob is already
+ * 8-byte aligned. The scan only exists so that an empty or stale section
+ * degrades to the bootloader FDT instead of hanging the boot.
+ */
+static void * __init builtin_fdt(int *size)
+{
+	char *p;
+
+	for (p = __dtb_start; p + sizeof(struct fdt_header) <= __dtb_end;
+	     p += 8) {
+		if (fdt_check_header(p))
+			continue;
+
+		*size = fdt_totalsize(p);
+		if (*size <= 0 || p + *size > __dtb_end)
+			continue;
+
+		return p;
+	}
+
+	return NULL;
+}
+#else
+static void * __init builtin_fdt(int *size)
+{
+	return NULL;
+}
+#endif
+
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
 	int size = 0;
-	void *dt_virt = fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL);
+	void *dt_virt = builtin_fdt(&size);
+	bool builtin = dt_virt != NULL;
 	const char *name;
 
-	if (dt_virt)
-		memblock_reserve(dt_phys, size);
+	if (builtin) {
+		/*
+		 * The blob lives inside the kernel image, so it is mapped and
+		 * memblock-reserved already, and fixmap_remap_fdt() must not be
+		 * used on it: that helper only knows how to map a standalone
+		 * physical FDT through the fixmap.
+		 */
+		dt_phys = __pa_symbol(dt_virt);
+		pr_notice("Using built-in DTB, ignoring bootloader FDT\n");
+	} else {
+		dt_virt = fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL);
+		if (dt_virt)
+			memblock_reserve(dt_phys, size);
+	}
+
+	arm64_boot_beacon_str("dtb-src", builtin ? "builtin" : "bootloader");
+	arm64_boot_beacon_val("dtb-size", size);
 
 	/*
 	 * dt_virt is a fixmap address, hence __pa(dt_virt) can't be used.
@@ -197,13 +251,15 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 	}
 
 	/* Early fixups are done, map the FDT as read-only now */
-	fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL_RO);
+	if (!builtin)
+		fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL_RO);
 
 	name = of_flat_dt_get_machine_name();
 	if (!name)
 		return;
 
 	pr_info("Machine model: %s\n", name);
+	arm64_boot_beacon_str("model", name);
 	dump_stack_set_arch_desc("%s (DT)", name);
 }
 
@@ -289,7 +345,16 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	early_fixmap_init();
 	early_ioremap_init();
 
+	/*
+	 * First point at which anything at all can be recorded on a device
+	 * with no usable console. Everything before this is invisible.
+	 */
+	arm64_boot_beacon("pre-fdt");
+	arm64_boot_beacon_val("fdt-pa", __fdt_pointer);
+
 	setup_machine_fdt(__fdt_pointer);
+
+	arm64_boot_beacon("post-fdt");
 
 	/*
 	 * Initialise the static keys early as they may be enabled by the
@@ -331,7 +396,52 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	arm64_memblock_init();
 
+	arm64_boot_beacon("post-memblock");
+
 	paging_init();
+
+	arm64_boot_beacon("post-paging");
+
+	/*
+	 * Round I. Copy a built-in DTB out of __init -- here, not in
+	 * arm64_memblock_init() where round H tried it. memblock_alloc()
+	 * zeroes its result through the linear map (mm/memblock.c:1864)
+	 * and the linear map only exists after paging_init() above; round
+	 * H died in that memset with ESR 0x96000044 (write, translation
+	 * fault level 0) on the boot CPU idle task, before reaching its
+	 * own beacon line.
+	 *
+	 * Why the copy is needed at all: KERNEL_DTB() puts
+	 * .dtb.init.rodata inside INIT_DATA, populate_properties()
+	 * aliases pp->name and pp->value straight into the blob, and
+	 * arm64 free_initmem() vunmap_range()s [__init_begin,
+	 * __init_end). Round G caught the result: a level-3 translation
+	 * fault at __dtb_start + 0x7c on the first sysfs read of the root
+	 * "model" property.
+	 *
+	 * Doing it here is late enough for the allocator and still early
+	 * enough for the only consumer that matters:
+	 * unflatten_device_tree() below reads initial_boot_params. The
+	 * one thing already past is early_init_fdt_scan_reserved_mem(),
+	 * which has to run before paging_init() so map_mem() knows the
+	 * no-map regions; it left rmem->name pointing into the blob
+	 * (of_reserved_mem.c:649). The copy is byte-identical, so those
+	 * names rebase exactly by the same delta.
+	 */
+	if (initial_boot_params &&
+	    (void *)__init_begin <= initial_boot_params &&
+	    initial_boot_params < (void *)__init_end) {
+		int fdt_size = fdt_totalsize(initial_boot_params);
+		void *orig = initial_boot_params;
+		void *copy = memblock_alloc_or_panic(fdt_size,
+					roundup_pow_of_two(FDT_V17_SIZE));
+
+		memcpy(copy, orig, fdt_size);
+		initial_boot_params = copy;
+		arm64_boot_beacon_val("dtb-copied", (u64)copy);
+		arm64_boot_beacon_val("rmem-rebased",
+			of_reserved_mem_rebase_names(orig, copy, fdt_size));
+	}
 
 	acpi_table_upgrade();
 
@@ -373,6 +483,8 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 			"This indicates a broken bootloader or old kernel\n",
 			boot_args[1], boot_args[2], boot_args[3]);
 	}
+
+	arm64_boot_beacon("setup_arch-done");
 }
 
 static inline bool cpu_can_disable(unsigned int cpu)

@@ -31,6 +31,7 @@
 #include <linux/cfi.h>
 
 #include <asm/atomic.h>
+#include <asm/boot-beacon.h>
 #include <asm/bug.h>
 #include <asm/cpufeature.h>
 #include <asm/daifflags.h>
@@ -207,6 +208,22 @@ void die(const char *str, struct pt_regs *regs, long err)
 {
 	int ret;
 	unsigned long flags;
+
+	arm64_boot_beacon_str("die", str);
+	arm64_boot_beacon_val("die-pc", regs ? regs->pc : 0);
+	/*
+	 * Round G. The PC alone says where the kernel was, not why it
+	 * stopped or who put it there. memcpy is a leaf function, so x30 is
+	 * still the return address of its caller -- that is the one number
+	 * that turns round F's "a bad pointer reached memcpy" into a named
+	 * call site. esr is `err` on the abort paths, and its EC/DFSC fields
+	 * separate an unmapped address from a permission fault. comm is
+	 * TASK_COMM_LEN bounded, so it cannot run away with the record.
+	 */
+	arm64_boot_beacon_val("die-lr", regs ? regs->regs[30] : 0);
+	arm64_boot_beacon_val("die-esr", (u64)err);
+	arm64_boot_beacon_val("die-sp", regs ? regs->sp : 0);
+	arm64_boot_beacon_str("die-comm", current->comm);
 
 	raw_spin_lock_irqsave(&die_lock, flags);
 

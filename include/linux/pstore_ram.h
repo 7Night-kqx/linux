@@ -39,4 +39,17 @@ struct ramoops_platform_data {
 	struct persistent_ram_ecc_info ecc_info;
 };
 
+/*
+ * Round J (local bring-up, not for upstream). Report the pstore-ram console
+ * zone header into the arm64 boot beacon, which lives in a different DRAM
+ * zone and so can testify about this one.
+ */
+#if IS_BUILTIN(CONFIG_PSTORE_RAM) && defined(CONFIG_ARM64_BOOT_BEACON)
+void pstore_ram_beacon_report(const char *tag);
+void pstore_ram_beacon_dump(const char *tag);
+#else
+static inline void pstore_ram_beacon_report(const char *tag) { }
+static inline void pstore_ram_beacon_dump(const char *tag) { }
+#endif
+
 #endif

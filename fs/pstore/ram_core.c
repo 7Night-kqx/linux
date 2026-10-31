@@ -21,6 +21,19 @@
 
 #include "ram_internal.h"
 
+/*
+ * Round J: local bring-up instrumentation, not for upstream. arm64 only,
+ * and this file is built on every architecture, so it is stubbed elsewhere.
+ */
+#ifdef CONFIG_ARM64_BOOT_BEACON
+#include <asm/boot-beacon.h>
+#else
+static inline void arm64_boot_beacon(const char *stage) { }
+static inline void arm64_boot_beacon_val(const char *k, u64 v) { }
+static inline void arm64_boot_beacon_str(const char *k, const char *v) { }
+static inline u32 arm64_boot_beacon_bulk(const void *src, u32 len, u32 *stride_out) { return 0; }
+#endif
+
 /**
  * struct persistent_ram_buffer - persistent circular RAM buffer
  *
@@ -58,11 +71,27 @@ static size_t buffer_start_add(struct persistent_ram_zone *prz, size_t a)
 	if (!(prz->flags & PRZ_FLAG_NO_LOCK))
 		raw_spin_lock_irqsave(&prz->buffer_lock, flags);
 
+#ifdef CONFIG_PSTORE_RAM_PIN_START
+	/*
+	 * The cursor advances, the persisted field does not. Storing 0 on every
+	 * write is not a no-op worth optimising away: it keeps the header's
+	 * cache line freshly written right up to the reset, which is the leading
+	 * explanation for why these 12 bytes survive decay when the data area
+	 * does not.
+	 */
+	old = prz->write_cursor;
+	new = old + a;
+	while (unlikely(new >= prz->buffer_size))
+		new -= prz->buffer_size;
+	prz->write_cursor = new;
+	atomic_set(&prz->buffer->start, 0);
+#else
 	old = atomic_read(&prz->buffer->start);
 	new = old + a;
 	while (unlikely(new >= prz->buffer_size))
 		new -= prz->buffer_size;
 	atomic_set(&prz->buffer->start, new);
+#endif
 
 	if (!(prz->flags & PRZ_FLAG_NO_LOCK))
 		raw_spin_unlock_irqrestore(&prz->buffer_lock, flags);
@@ -400,6 +429,9 @@ void persistent_ram_free_old(struct persistent_ram_zone *prz)
 
 void persistent_ram_zap(struct persistent_ram_zone *prz)
 {
+#ifdef CONFIG_PSTORE_RAM_PIN_START
+	prz->write_cursor = 0;
+#endif
 	atomic_set(&prz->buffer->start, 0);
 	atomic_set(&prz->buffer->size, 0);
 	persistent_ram_update_header_ecc(prz);
@@ -565,6 +597,68 @@ static int persistent_ram_post_init(struct persistent_ram_zone *prz, u32 sig,
 		persistent_ram_zap(prz);
 
 	return 0;
+}
+
+/*
+ * Round J. Report a zone's twelve-byte persistent_ram header into the boot
+ * beacon. The beacon lives in the *other* zone (0xa3700000), so this is the
+ * one channel that can say what 0xa3500000 held at reset time without
+ * depending on 0xa3500000 surviving.
+ */
+void persistent_ram_beacon_report(const char *tag,
+				  struct persistent_ram_zone *prz)
+{
+	if (!prz || !prz->buffer) {
+		arm64_boot_beacon_str("prz-absent", tag);
+		return;
+	}
+
+	arm64_boot_beacon_str("prz", tag);
+	arm64_boot_beacon_val("prz-pa", (u64)prz->paddr);
+	arm64_boot_beacon_val("prz-sig", (u64)prz->buffer->sig);
+	arm64_boot_beacon_val("prz-start", (u64)buffer_start(prz));
+	arm64_boot_beacon_val("prz-size", (u64)buffer_size(prz));
+}
+
+/*
+ * Round K. Copy this zone's payload into the beacon's zone, replicated, and
+ * publish the geometry as beacon lines so a reader never has to infer it.
+ *
+ * Round J established both halves of why this is worth doing: the payload is
+ * really there (22202 bytes at reset), and this zone's lone twelve-byte header
+ * is what loses it. The beacon's header has never been lost.
+ */
+void persistent_ram_beacon_bulk(const char *tag,
+				struct persistent_ram_zone *prz)
+{
+	u32 stride = 0, copies, len;
+
+	if (!prz || !prz->buffer) {
+		arm64_boot_beacon_str("bulk-absent", tag);
+		return;
+	}
+
+	len = (u32)buffer_size(prz);
+
+	/*
+	 * buffer->size is DRAM that decays, and this one is read at reset after
+	 * a whole boot's worth of it. Clamp before it is used as a length, or a
+	 * single 0 -> 1 flip high in the field walks the copy off the mapping.
+	 */
+	if (len > prz->buffer_size)
+		len = (u32)prz->buffer_size;
+
+	if (!len) {
+		arm64_boot_beacon_str("bulk-empty", tag);
+		return;
+	}
+
+	copies = arm64_boot_beacon_bulk(prz->buffer->data, len, &stride);
+
+	arm64_boot_beacon_str("bulk", tag);
+	arm64_boot_beacon_val("bulk-len", (u64)len);
+	arm64_boot_beacon_val("bulk-stride", (u64)stride);
+	arm64_boot_beacon_val("bulk-copies", (u64)copies);
 }
 
 void persistent_ram_free(struct persistent_ram_zone **_prz)

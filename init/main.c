@@ -120,6 +120,18 @@
 
 #include <kunit/test.h>
 
+/*
+ * Local bring-up instrumentation, not for upstream. arm64 only, so it is
+ * stubbed elsewhere -- every architecture compiles this file.
+ */
+#ifdef CONFIG_ARM64_BOOT_BEACON
+#include <asm/boot-beacon.h>
+#else
+static inline void arm64_boot_beacon(const char *stage) { }
+static inline void arm64_boot_beacon_val(const char *k, u64 v) { }
+static inline void arm64_boot_beacon_str(const char *k, const char *v) { }
+#endif
+
 static int kernel_init(void *);
 
 /*
@@ -1047,6 +1059,7 @@ void start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_core_init();
+	arm64_boot_beacon("mm_core_init-done");
 	maple_tree_init();
 	poking_init();
 	ftrace_init();
@@ -1060,6 +1073,7 @@ void start_kernel(void)
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
 	sched_init();
+	arm64_boot_beacon("sched_init-done");
 
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
@@ -1092,6 +1106,7 @@ void start_kernel(void)
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
 	init_IRQ();
+	arm64_boot_beacon("init_IRQ-done");
 	tick_init();
 	rcu_init_nohz();
 	timers_init();
@@ -1187,6 +1202,7 @@ void start_kernel(void)
 	kcsan_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
+	arm64_boot_beacon("pre-rest_init");
 	rest_init();
 
 	/*
@@ -1422,6 +1438,7 @@ static void __init do_initcall_level(int level, char *command_line)
 	do_trace_initcall_level(initcall_level_names[level]);
 	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
 		do_one_initcall(initcall_from_entry(fn));
+	arm64_boot_beacon_str("initcall-done", initcall_level_names[level]);
 }
 
 static void __init do_initcalls(void)
@@ -1565,6 +1582,7 @@ static int __ref kernel_init(void *unused)
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
+	arm64_boot_beacon("async-sync-done");
 
 	system_state = SYSTEM_FREEING_INITMEM;
 	kprobe_free_init_mem();
@@ -1573,6 +1591,7 @@ static int __ref kernel_init(void *unused)
 	exit_boot_config();
 	free_initmem();
 	mark_readonly();
+	arm64_boot_beacon("initmem-freed");
 
 	/*
 	 * Kernel mappings are now finalized - update the userspace page-table
@@ -1586,11 +1605,14 @@ static int __ref kernel_init(void *unused)
 	rcu_end_inkernel_boot();
 
 	do_sysctl_args();
+	arm64_boot_beacon("pre-run-init");
 
 	if (ramdisk_execute_command) {
+		arm64_boot_beacon("run-rdinit");
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
 			return 0;
+		arm64_boot_beacon_val("rdinit-exec-err", (u64)-ret);
 		pr_err("Failed to execute %s (error %d)\n",
 		       ramdisk_execute_command, ret);
 	}
@@ -1678,6 +1700,7 @@ static noinline void __init kernel_init_freeable(void)
 
 	wait_for_initramfs();
 	console_on_rootfs();
+	arm64_boot_beacon("initramfs-ready");
 
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
@@ -1686,11 +1709,16 @@ static noinline void __init kernel_init_freeable(void)
 	int ramdisk_command_access;
 	ramdisk_command_access = init_eaccess(ramdisk_execute_command);
 	if (ramdisk_command_access != 0) {
+		arm64_boot_beacon("rdinit-inaccessible");
+		arm64_boot_beacon_val("rdinit-err", (u64)-ramdisk_command_access);
 		if (ramdisk_execute_command_set)
 			pr_warn("check access for rdinit=%s failed: %i, ignoring\n",
 				ramdisk_execute_command, ramdisk_command_access);
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
+		arm64_boot_beacon("prepare_namespace-done");
+	} else {
+		arm64_boot_beacon("rdinit-ok");
 	}
 
 	/*
@@ -1703,4 +1731,5 @@ static noinline void __init kernel_init_freeable(void)
 	 */
 
 	integrity_load_keys();
+	arm64_boot_beacon("kernel_init_freeable-done");
 }

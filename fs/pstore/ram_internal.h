@@ -67,6 +67,15 @@ struct persistent_ram_zone {
 	raw_spinlock_t buffer_lock;
 	struct persistent_ram_buffer *buffer;
 	size_t buffer_size;
+#ifdef CONFIG_PSTORE_RAM_PIN_START
+	/*
+	 * Write offset, deliberately outside the persistent record: with
+	 * PSTORE_RAM_PIN_START the header's start field stays 0 forever, so the
+	 * cursor has to live somewhere that does not decay. size_t to match the
+	 * old/new locals in buffer_start_add() with no narrowing.
+	 */
+	size_t write_cursor;
+#endif
 
 	char *par_buffer;
 	char *par_header;
@@ -84,6 +93,14 @@ struct persistent_ram_zone *persistent_ram_new(phys_addr_t start, size_t size,
 			unsigned int memtype, u32 flags, char *label);
 void persistent_ram_free(struct persistent_ram_zone **_prz);
 void persistent_ram_zap(struct persistent_ram_zone *prz);
+
+/* Round J (local bring-up): dump a zone header into the boot beacon. */
+void persistent_ram_beacon_report(const char *tag,
+				  struct persistent_ram_zone *prz);
+
+/* Round K (local bring-up): replicate a zone's payload into the beacon zone. */
+void persistent_ram_beacon_bulk(const char *tag,
+				struct persistent_ram_zone *prz);
 
 int persistent_ram_write(struct persistent_ram_zone *prz, const void *s,
 			 unsigned int count);

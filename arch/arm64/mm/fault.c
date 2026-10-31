@@ -30,6 +30,7 @@
 #include <linux/hugetlb.h>
 
 #include <asm/acpi.h>
+#include <asm/boot-beacon.h>
 #include <asm/bug.h>
 #include <asm/cmpxchg.h>
 #include <asm/cpufeature.h>
@@ -345,6 +346,15 @@ static bool __kprobes is_spurious_el1_translation_fault(unsigned long addr,
 static void die_kernel_fault(const char *msg, unsigned long addr,
 			     unsigned long esr, struct pt_regs *regs)
 {
+	/*
+	 * Round G. First statements in the function, ahead of
+	 * bust_spinlocks(), so they are in the record before any of the
+	 * decode/show_pte machinery gets a chance to fault again. addr is
+	 * the argument, not a read of FAR_EL1, so it survives that.
+	 */
+	arm64_boot_beacon_str("fault", msg);
+	arm64_boot_beacon_val("fault-addr", addr);
+
 	bust_spinlocks(1);
 
 	pr_alert("Unable to handle kernel %s at virtual address %016lx\n", msg,

@@ -25,6 +25,18 @@
 #include "internal.h"
 #include "ram_internal.h"
 
+/*
+ * Round J: local bring-up instrumentation, not for upstream. arm64 only,
+ * and this file is built on every architecture, so it is stubbed elsewhere.
+ */
+#ifdef CONFIG_ARM64_BOOT_BEACON
+#include <asm/boot-beacon.h>
+#else
+static inline void arm64_boot_beacon(const char *stage) { }
+static inline void arm64_boot_beacon_val(const char *k, u64 v) { }
+static inline void arm64_boot_beacon_str(const char *k, const char *v) { }
+#endif
+
 #define RAMOOPS_KERNMSG_HDR "===="
 #define MIN_MEM_SIZE 4096UL
 
@@ -729,6 +741,9 @@ static int ramoops_probe(struct platform_device *pdev)
 	phys_addr_t paddr;
 	int err = -EINVAL;
 
+	/* Round J: the driver bound. Nine rounds never established this. */
+	arm64_boot_beacon("ramoops-probe");
+
 	/*
 	 * Only a single ramoops area allowed at a time, so fail extra
 	 * probes.
@@ -783,6 +798,10 @@ static int ramoops_probe(struct platform_device *pdev)
 
 	paddr = cxt->phys_addr;
 
+	/* Round J: geometry as ramoops_parse_dt() understood it. */
+	arm64_boot_beacon_val("ramoops-pa", (u64)cxt->phys_addr);
+	arm64_boot_beacon_val("ramoops-console", (u64)cxt->console_size);
+
 	dump_mem_sz = cxt->size - cxt->console_size - cxt->ftrace_size
 			- cxt->pmsg_size;
 	err = ramoops_init_przs("dmesg", dev, cxt, &cxt->dprzs, &paddr,
@@ -795,6 +814,9 @@ static int ramoops_probe(struct platform_device *pdev)
 			       cxt->console_size, 0);
 	if (err)
 		goto fail_init;
+
+	/* Round J: start and size should both read 0 here. */
+	persistent_ram_beacon_report("cprz-init", cxt->cprz);
 
 	err = ramoops_init_prz("pmsg", dev, cxt, &cxt->mprz, &paddr,
 				cxt->pmsg_size, 0);
@@ -851,6 +873,9 @@ static int ramoops_probe(struct platform_device *pdev)
 		pr_err("registering with pstore failed\n");
 		goto fail_buf;
 	}
+
+	/* Round J: PSTORE_FLAGS_CONSOLE is bit 1; without it no console. */
+	arm64_boot_beacon_val("pstore-flags", (u64)cxt->pstore.flags);
 
 	/*
 	 * Update the module parameter variables as well so they are visible
@@ -973,6 +998,30 @@ static void __init ramoops_register_dummy(void)
 		dummy = NULL;
 	}
 }
+
+#if IS_BUILTIN(CONFIG_PSTORE_RAM) && defined(CONFIG_ARM64_BOOT_BEACON)
+/*
+ * Round J. Called from kernel_restart(), the last point at which this
+ * kernel can still say anything. If sig/start/size are right here and the
+ * next kernel still finds no console-ramoops-0, the loss is downstream of
+ * us -- DRAM decay or stock's parse -- not a missing write.
+ */
+void pstore_ram_beacon_report(const char *tag)
+{
+	persistent_ram_beacon_report(tag, oops_cxt.cprz);
+}
+
+/*
+ * Round K. Report the header, then copy the payload out. Report first: if the
+ * copy faults or the mapping was never pinned, the header line is already in
+ * the record and the round still says as much as round J did.
+ */
+void pstore_ram_beacon_dump(const char *tag)
+{
+	persistent_ram_beacon_report(tag, oops_cxt.cprz);
+	persistent_ram_beacon_bulk(tag, oops_cxt.cprz);
+}
+#endif
 
 static int __init ramoops_init(void)
 {

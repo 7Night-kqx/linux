@@ -41,6 +41,16 @@
 #include <asm/sections.h>
 #include <kunit/test-bug.h>
 
+/*
+ * Local bring-up instrumentation, not for upstream. arm64 only, and this file is
+ * built for every architecture, so it is stubbed elsewhere.
+ */
+#ifdef CONFIG_ARM64_BOOT_BEACON
+#include <asm/boot-beacon.h>
+#else
+static inline void arm64_boot_beacon_str(const char *k, const char *v) { }
+#endif
+
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
 #define PANIC_MSG_BUFSZ 1024
@@ -636,6 +646,8 @@ void vpanic(const char *fmt, va_list args)
 
 	if (len && buf[len - 1] == '\n')
 		buf[len - 1] = '\0';
+
+	arm64_boot_beacon_str("panic", buf);
 
 	pr_emerg("Kernel panic - not syncing: %s\n", buf);
 	/*

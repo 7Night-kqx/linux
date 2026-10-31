@@ -20,6 +20,17 @@
 #include <linux/syscalls.h>
 #include <linux/syscore_ops.h>
 #include <linux/uaccess.h>
+#include <linux/pstore_ram.h>
+
+/*
+ * Local bring-up instrumentation, not for upstream. arm64 only, so it is
+ * stubbed elsewhere -- every architecture compiles this file.
+ */
+#ifdef CONFIG_ARM64_BOOT_BEACON
+#include <asm/boot-beacon.h>
+#else
+static inline void arm64_boot_beacon(const char *stage) { }
+#endif
 
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
@@ -287,6 +298,50 @@ static void do_kernel_restart_prepare(void)
  */
 void kernel_restart(char *cmd)
 {
+	/*
+	 * Round H. Reached by reboot(2) and orderly_reboot(), not by panic()
+	 * (which goes through emergency_restart()). So this line appearing
+	 * means userspace ran to the end of work/dada-init.c and asked for
+	 * the reboot itself -- the positive form of "the DTB copy fixed it".
+	 */
+	arm64_boot_beacon("kernel-restart");
+
+	/*
+	 * Round J. The last chance this kernel has to say what it left at
+	 * 0xa3500000. console-ramoops-0 has been missing for nine rounds and
+	 * the reason has never been narrowed to a side of the mailbox.
+	 */
+	/*
+	 * Round J reported the header here and that is what proved the payload
+	 * exists. Round K also copies the payload itself into the beacon zone,
+	 * because the search of the vendor log partitions showed the record was
+	 * lost rather than consumed, so the fix belongs on this side.
+	 */
+	pstore_ram_beacon_dump("cprz-restart");
+
+#ifdef CONFIG_ARM64_BOOT_BEACON_PANIC_EXIT
+	/*
+	 * Round K. The vendor bootmonitor snapshots the raw ramoops zones to the
+	 * blackbox partition on an abnormal exit and not on a clean one: round H
+	 * panicked and its zones are still on flash with 0.0% per-copy decay,
+	 * while rounds I and J returned through here and were never captured
+	 * (evidence/oops-blackbox-search-2026-09-05.md). Panicking here rather
+	 * than replacing the exit costs nothing: userspace still called
+	 * reboot(2), `stage: kernel-restart` is already in the record, and the
+	 * lines above have already been emitted. Only the last few instructions
+	 * of this function are skipped.
+	 *
+	 * panic_timeout turns this into emergency_restart(), so the device comes
+	 * back on its own. The cmdline sets panic=5; the assignment below is
+	 * there so that a build without it cannot leave the phone needing a
+	 * physical power-button reset.
+	 */
+	if (panic_timeout <= 0)
+		panic_timeout = 5;
+
+	panic("dada probe done: reboot(2) reached kernel_restart()");
+#endif
+
 	kernel_restart_prepare(cmd);
 	do_kernel_restart_prepare();
 	migrate_to_reboot_cpu();

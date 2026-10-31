@@ -81,6 +81,25 @@ config PSTORE_RAM
 
 	  For more information, see Documentation/admin-guide/ramoops.rst.
 
+config PSTORE_RAM_PIN_START
+	bool "Never advance the ramoops start field (bring-up only)"
+	depends on PSTORE_RAM
+	help
+	  Keep the start field of every ramoops zone header at 0 and track the
+	  write offset outside the record.
+
+	  This is for DRAM that loses bits across a reset. The reading kernel
+	  keeps a record only when start <= size, and normally both counters are
+	  advanced to the same value, so a single bit decaying out of size
+	  inverts that test and the whole record is thrown away. 0 has no bits
+	  to lose, and the record then reads back as the same linear text.
+
+	  The cost is that the ring stops wrapping: past the zone size the text
+	  reads back rotated. Say Y only for a one-shot bring-up kernel whose
+	  log fits in the zone.
+
+	  If unsure, say N.
+
 config PSTORE_ZONE
 	tristate
 	depends on PSTORE

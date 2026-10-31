@@ -71,6 +71,8 @@ obj-$(CONFIG_ARM64_PTR_AUTH)		+= pointer_auth.o
 obj-$(CONFIG_ARM64_MPAM)		+= mpam.o
 obj-$(CONFIG_ARM64_MTE)			+= mte.o
 obj-y					+= vdso-wrap.o
+obj-$(CONFIG_ARM64_BOOT_BEACON)		+= boot-beacon.o
+obj-y					+= dada-early-mdss.o
 obj-$(CONFIG_COMPAT_VDSO)		+= vdso32-wrap.o
 
 # Force dependency (vdso*-wrap.S includes vdso.so through incbin)
