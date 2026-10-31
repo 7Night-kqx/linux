@@ -80,6 +80,11 @@ enum qca_flags {
 	QCA_BT_OFF,
 	QCA_ROM_FW,
 	QCA_DEBUGFS_CREATED,
+	/* Peach: host must never send SLEEP_IND.  The controller wedges
+	 * after the first 0xFE and stops answering HCI commands forever
+	 * (IBS byte ack 0xFC still works via its ROM sniffer).
+	 */
+	QCA_IBS_NO_SLEEP,
 };
 
 enum qca_capabilities {
@@ -481,6 +486,14 @@ static void hci_ibs_tx_idle_timeout(struct timer_list *t)
 
 	spin_lock_irqsave_nested(&qca->hci_ibs_lock,
 				 flags, SINGLE_DEPTH_NESTING);
+
+	/* Peach: never enter TX sleep -- sending SLEEP_IND wedges the
+	 * controller.  Stay awake and re-arm nothing.
+	 */
+	if (test_bit(QCA_IBS_NO_SLEEP, &qca->flags)) {
+		spin_unlock_irqrestore(&qca->hci_ibs_lock, flags);
+		return;
+	}
 
 	switch (qca->tx_ibs_state) {
 	case HCI_IBS_TX_AWAKE:
@@ -1908,6 +1921,32 @@ static int qca_configure_hfp_offload(struct hci_dev *hdev)
 	return 0;
 }
 
+static bool qca_peach_uses_current_baudrate(enum qca_btsoc_type soc_type,
+					    const struct qca_btsoc_version *ver)
+{
+	u32 product_id, soc_id;
+	u16 rom_ver;
+
+	if (soc_type != QCA_WCN7850)
+		return false;
+
+	product_id = le32_to_cpu(ver->product_id);
+	soc_id = le32_to_cpu(ver->soc_id);
+	rom_ver = le16_to_cpu(ver->rom_ver);
+
+	/*
+	 * The Qualcomm Peach HAL deliberately skips SetBaudRateReq (0xfc48)
+	 * for these product/ROM tuples and starts the TLV download at the UART
+	 * rate which was used successfully for the version request. Sending
+	 * 0xfc48 here instead leaves the controller silent; on dada
+	 * (ganges/WCN7880) it produces -84 reassembly errors and alternating
+	 * version read failures across retries.
+	 */
+	return ((soc_id == 0x40210100 && rom_ver == 0x0100) ||
+		(soc_id == 0x40210200 && rom_ver == 0x0200)) &&
+	       (product_id == 0x1e || product_id == 0x21);
+}
+
 static int qca_setup(struct hci_uart *hu)
 {
 	struct hci_dev *hdev = hu->hdev;
@@ -2002,13 +2041,18 @@ retry:
 
 	/* Setup user speed if needed */
 	speed = qca_get_speed(hu, QCA_OPER_SPEED);
-	if (speed) {
+	if (speed && !qca_peach_uses_current_baudrate(soc_type, &ver)) {
 		ret = qca_set_speed(hu, QCA_OPER_SPEED);
 		if (ret)
 			goto out;
 
 		qca_baudrate = qca_get_baudrate_value(speed);
 	}
+	/*
+	 * Peach tuple: skip 0xfc48 entirely. The transport stays at the
+	 * version-request rate (115200) and qca_baudrate stays
+	 * QCA_BAUDRATE_115200, so the NVM HCI baud tag matches the live rate.
+	 */
 
 	switch (soc_type) {
 	case QCA_WCN3950:
@@ -2033,6 +2077,8 @@ retry:
 			firmware_name, rampatch_name);
 	if (!ret) {
 		clear_bit(QCA_IBS_DISABLED, &qca->flags);
+		if (qca_peach_uses_current_baudrate(soc_type, &ver))
+			set_bit(QCA_IBS_NO_SLEEP, &qca->flags);
 		qca_debugfs_init(hdev);
 		hu->hdev->hw_error = qca_hw_error;
 		hu->hdev->reset = qca_reset;

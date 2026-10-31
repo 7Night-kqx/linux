@@ -97,6 +97,7 @@ struct qca_fw_config {
 	uint8_t user_baud_rate;
 	enum qca_tlv_dnld_mode dnld_mode;
 	enum qca_tlv_dnld_mode dnld_type;
+	bool current_baud_download;
 	bdaddr_t bdaddr;
 };
 

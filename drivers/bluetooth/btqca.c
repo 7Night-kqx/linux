@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/vmalloc.h>
+#include <linux/delay.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -421,9 +422,13 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 
 				/* HCI transport layer parameters
 				 * enabling software inband sleep
-				 * onto controller side.
+				 * onto controller side.  Peach (tuple
+				 * gated) must not enable it: the
+				 * controller then stops responding
+				 * after ~2s of UART idle.
 				 */
-				tlv_nvm->data[0] |= 0x80;
+				if (!config->current_baud_download)
+					tlv_nvm->data[0] |= 0x80;
 
 				/* UART Baud Rate */
 				if (soc_type >= QCA_WCN3991)
@@ -434,6 +439,21 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 				break;
 
 			case EDL_TAG_ID_DEEP_SLEEP:
+				/* Peach: disable controller self-sleep
+				 * (data[0] bit0 = "Sleep enable mask ...
+				 * deep sleep feature on controller").
+				 * With it enabled the controller stops
+				 * answering ~1s after last traffic and
+				 * never recovers without firmware reload.
+				 */
+				if (config->current_baud_download) {
+					if (tag_len < 2)
+						return -EINVAL;
+					tlv_nvm->data[0] &= ~0x01;
+					tlv_nvm->data[1] |= 0x01;
+					break;
+				}
+
 				if (tag_len < 1)
 					return -EINVAL;
 
@@ -459,7 +479,8 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 
 static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 				const u8 *data, enum qca_tlv_dnld_mode mode,
-				enum qca_btsoc_type soc_type)
+				enum qca_btsoc_type soc_type,
+				bool current_baud_download)
 {
 	struct sk_buff *skb;
 	struct edl_event_hdr *edl;
@@ -474,9 +495,21 @@ static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 	cmd[1] = seg_size;
 	memcpy(cmd + 2, data, seg_size);
 
-	if (mode == QCA_SKIP_EVT_VSE_CC || mode == QCA_SKIP_EVT_VSE)
-		return __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
-				      cmd);
+	if (mode == QCA_SKIP_EVT_VSE_CC || mode == QCA_SKIP_EVT_VSE) {
+		err = __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
+				     cmd);
+		/*
+		 * The Peach tuple exemption keeps the live transport at 115200.
+		 * Pace unacknowledged packets so the final synchronous command
+		 * is not queued behind the entire rampatch while its fixed HCI
+		 * command timer is already running (243-byte segment on
+		 * 115200 8N1 is ~21ms of wire time).
+		 */
+		if (!err && current_baud_download)
+			usleep_range(24000, 25000);
+
+		return err;
+	}
 
 	/* Unlike other SoC's sending version command response as payload to
 	 * VSE event. WCN3991 sends version command response as a payload to
@@ -612,7 +645,8 @@ static int qca_download_firmware(struct hci_dev *hdev,
 			config->dnld_mode = QCA_SKIP_EVT_NONE;
 
 		ret = qca_tlv_send_segment(hdev, segsize, segment,
-					   config->dnld_mode, soc_type);
+					   config->dnld_mode, soc_type,
+					   config->current_baud_download);
 		if (ret)
 			goto out;
 
@@ -765,6 +799,23 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 
 	config.user_baud_rate = baudrate;
 
+	/*
+	 * Qualcomm Peach HAL tuples: the controller rejects SetBaudRateReq
+	 * (0xfc48) during firmware download, so the transport must stay at
+	 * the rate used for the version request (115200) and the segments
+	 * are paced in qca_tlv_send_segment().
+	 */
+	{
+		u32 product_id = le32_to_cpu(ver.product_id);
+		u32 soc_id = le32_to_cpu(ver.soc_id);
+		u16 tuple_rom = le16_to_cpu(ver.rom_ver);
+
+		config.current_baud_download =
+			((soc_id == 0x40210100 && tuple_rom == 0x0100) ||
+			 (soc_id == 0x40210200 && tuple_rom == 0x0200)) &&
+			(product_id == 0x1e || product_id == 0x21);
+	}
+
 	/* Firmware files to download are based on ROM version.
 	 * ROM version is derived from last two bytes of soc_ver.
 	 */
@@ -782,6 +833,13 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	config.type = TLV_TYPE_PATCH;
 	if (rampatch_name) {
 		snprintf(config.fwname, sizeof(config.fwname), "qca/%s", rampatch_name);
+
+		/* ELF-packaged rampatch (e.g. gngbtfw20.mbn) must be
+		 * downloaded with the ELF segment protocol, not TLV.
+		 */
+		if (qca_filename_has_extension(rampatch_name) &&
+		    strcmp(strrchr(rampatch_name, '.'), ".mbn") == 0)
+			config.type = ELF_TYPE_PATCH;
 	} else {
 		switch (soc_type) {
 		case QCA_QCA2066:
