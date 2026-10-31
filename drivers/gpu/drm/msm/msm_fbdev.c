@@ -157,6 +157,15 @@ int msm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
 	fbi->fbops = &msm_fb_ops;
 	fbi->flags |= FBINFO_VIRTFB; /* system memory */
 
+	/*
+	 * The scanout buffer is a kernel virtual mapping of a GEM object, not
+	 * MMIO, and msm_fb_ops is built out of the sys helpers: fb_sys_read(),
+	 * fb_sys_write(), sys_fillrect(), sys_copyarea() and sys_imgblt() all
+	 * reach it through info->screen_buffer and warn with "Framebuffer is
+	 * not in virtual address space." unless FBINFO_VIRTFB is set.
+	 */
+	fbi->flags |= FBINFO_VIRTFB;
+
 	drm_fb_helper_fill_info(fbi, helper, sizes);
 
 	fbi->screen_buffer = msm_gem_get_vaddr(bo);

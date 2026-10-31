@@ -987,6 +987,12 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 
 		dsi_write(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL, reg_ctrl);
 		dsi_write(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL2, reg_ctrl2);
+
+		pr_info("DSI_DSC_MODE_DBG cpu=%d id=%d ctrl=0x%x ctrl2=0x%x "
+			"pkt_per_line=%d eol=%d wc=%d chunk=%d sl_per_pkt=%d\n",
+			smp_processor_id(), msm_host->id, reg_ctrl, reg_ctrl2,
+			pkt_per_line, eol_byte_num, bytes_per_pkt,
+			dsc->slice_chunk_size, msm_host->dsc_slice_per_pkt);
 	} else {
 		reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_WC(bytes_per_pkt);
 		dsi_write(msm_host, REG_DSI_VIDEO_COMPRESSION_MODE_CTRL, reg);
@@ -1011,6 +1017,16 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 	bool wide_bus_enabled = msm_dsi_host_is_wide_bus_enabled(&msm_host->base);
 
 	DBG("");
+
+	pr_info("DSI_TIMING_DBG cpu=%d id=%d bonded=%d mode=%dx%d "
+		"htotal=%d vtotal=%d hdisp=%d dsc=%s chunk=%d "
+		"slice_cnt=%d slice_per_pkt=%d flags=0x%lx\n",
+		smp_processor_id(), msm_host->id, is_bonded_dsi,
+		mode->hdisplay, mode->vdisplay, h_total, v_total,
+		hdisplay, msm_host->dsc ? "yes" : "no",
+		msm_host->dsc ? msm_host->dsc->slice_chunk_size : 0,
+		msm_host->dsc ? msm_host->dsc->slice_count : 0,
+		msm_host->dsc_slice_per_pkt, mode->flags);
 
 	/*
 	 * For bonded DSI mode, the current DRM mode has
@@ -1156,6 +1172,137 @@ static void dsi_sw_reset(struct msm_dsi_host *msm_host)
 		dsi_write(msm_host, REG_DSI_CTRL, ctrl);
 		wmb();	/* make sure dsi controller enabled again */
 	}
+}
+
+/*
+ * dsi_pre_cmd_engine_reset() -- reset the controller from a clean, never-armed
+ * state, for use on the bootloader->kernel handover (msm_dsi_host_power_on).
+ *
+ * dsi_sw_reset() above is written for the runtime error/disable paths: it reads
+ * REG_DSI_CTRL, toggles REG_DSI_RESET, and *restores the value it read*.  On a
+ * handover that is wrong.  A bootloader that leaves its splash pipeline running
+ * hands us a controller with DSI_CTRL_ENABLE and one of VID_MODE_EN/CMD_MODE_EN
+ * still set.  Restoring that value re-arms the engine into the stale bootloader
+ * operating mode, and the very first command DMA is then triggered against an
+ * engine that was never brought up cleanly -- which, combined with a splash
+ * pipeline still fetching, is one of the ways the CMD-DMA engine wedges and
+ * every mipi_dsi_dcs_write() times out with -110 (round CA).
+ *
+ * So here we clear ENABLE|VID_MODE_EN|CMD_MODE_EN *before* the reset toggle and
+ * deliberately do NOT restore the old CTRL afterwards.  dsi_ctrl_enable(), which
+ * the caller runs immediately after, writes REG_DSI_CTRL from scratch (data = 0
+ * ... |= DSI_CTRL_ENABLE), so nothing is lost by leaving the engine disabled
+ * here -- it is programmed fresh a few lines later.  This is preventive, not
+ * curative: BS/BT proved a reset issued *after* the engine has already wedged
+ * cannot clear an in-flight AXI transfer.  The point is to never inherit the
+ * armed state in the first place.
+ */
+static void dsi_pre_cmd_engine_reset(struct msm_dsi_host *msm_host)
+{
+	u32 ctrl;
+
+	ctrl = dsi_read(msm_host, REG_DSI_CTRL);
+
+	/*
+	 * Drop every enable the bootloader may have left set, so the reset
+	 * toggles a quiescent engine rather than a live one.
+	 */
+	if (ctrl & (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN |
+		    DSI_CTRL_CMD_MODE_EN)) {
+		ctrl &= ~(DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN |
+			  DSI_CTRL_CMD_MODE_EN);
+		dsi_write(msm_host, REG_DSI_CTRL, ctrl);
+		wmb(); /* disable must land before clocks/reset */
+	}
+
+	dsi_write(msm_host, REG_DSI_CLK_CTRL, DSI_CLK_CTRL_ENABLE_CLKS);
+	wmb(); /* clocks need to be enabled before reset */
+
+	/* dsi controller can only be reset while clocks are running */
+	dsi_write(msm_host, REG_DSI_RESET, 1);
+	msleep(DSI_RESET_TOGGLE_DELAY_MS); /* make sure reset happen */
+	dsi_write(msm_host, REG_DSI_RESET, 0);
+	wmb(); /* controller out of reset */
+
+	/*
+	 * No restore: the engine stays disabled until dsi_ctrl_enable()
+	 * programs REG_DSI_CTRL from scratch.
+	 */
+}
+
+/*
+ * msm_dsi_host_soft_reset() -- runtime recovery reset for a wedged cmd engine.
+ *
+ * Called from the DPU timeout-recovery path (dpu_encoder_helper_hw_reset)
+ * after CTL_SW_RESET has already recovered the MDP side.  By that point
+ * DSI STATUS0 can still show CMD_MODE_ENGINE_BUSY|CMD_MODE_MDP_BUSY (0x5)
+ * with all four lane HS FIFOs empty -- the MDP is idle but the DSI cmd
+ * engine is orphaned mid-transfer.  Without this the next kickoff starts a
+ * new frame into a controller that still believes the previous one is in
+ * flight, and every subsequent frame times out: permanent trickle glitch.
+ *
+ * Sequence mirrors vendor dsi_ctrl_hw_cmn_soft_reset():
+ *   1. Drop ENABLE|VID_MODE_EN|CMD_MODE_EN so the reset toggles a quiescent
+ *      engine rather than re-arming a live one.
+ *   2. Force all clocks on via the original CLK_CTRL value ORed with the
+ *      vendor DSI_CTRL_DYNAMIC_FORCE_ON mask (PCLK/byte/ahbm force bits,
+ *      0x23F|BIT(8)|BIT(9)|BIT(11)|BIT(21)) -- the controller can only be
+ *      reset while clocks are running, and the plain ENABLE_CLKS constant
+ *      alone does not force the dynamic-gated domains.
+ *   3. Toggle REG_DSI_RESET.
+ *   4. Restore the original CLK_CTRL value (not the force-on value) and the
+ *      original CTRL value so the engine comes back armed in the same
+ *      operating mode the panel was configured for.
+ *
+ * Unlike dsi_sw_reset() this clears VID_MODE_EN/CMD_MODE_EN before the
+ * reset (dsi_sw_reset only clears ENABLE).  Unlike dsi_pre_cmd_engine_reset()
+ * this *restores* the original CTRL afterwards (pre_cmd leaves the engine
+ * disabled because the caller reprograms it from scratch).
+ */
+
+/* vendor dsi_ctrl_hw_cmn.c: DSI_CTRL_DYNAMIC_FORCE_ON */
+#define DSI_CLK_CTRL_DYNAMIC_FORCE_ON	(0x23F | BIT(8) | BIT(9) | BIT(11) | BIT(21))
+
+void msm_dsi_host_soft_reset(struct mipi_dsi_host *host)
+{
+	struct msm_dsi_host *msm_host = container_of(host,
+					struct msm_dsi_host, base);
+	u32 ctrl;
+	u32 clk_ctrl;
+
+	ctrl = dsi_read(msm_host, REG_DSI_CTRL);
+	clk_ctrl = dsi_read(msm_host, REG_DSI_CLK_CTRL);
+
+	if (ctrl & (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN |
+		    DSI_CTRL_CMD_MODE_EN)) {
+		dsi_write(msm_host, REG_DSI_CTRL,
+			  ctrl & ~(DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN |
+				   DSI_CTRL_CMD_MODE_EN));
+		wmb(); /* disable must land before clocks/reset */
+	}
+
+	/* force-enable all (incl. dynamic-gated) clocks for the reset */
+	dsi_write(msm_host, REG_DSI_CLK_CTRL,
+		  clk_ctrl | DSI_CLK_CTRL_DYNAMIC_FORCE_ON);
+	wmb(); /* clocks need to be enabled before reset */
+
+	/* dsi controller can only be reset while clocks are running */
+	dsi_write(msm_host, REG_DSI_RESET, 1);
+	wmb(); /* wait for reset to assert before waiting */
+	udelay(1);
+	dsi_write(msm_host, REG_DSI_RESET, 0);
+	wmb(); /* controller out of reset */
+
+	/* drop the force-on bits, restore the pre-reset clock state */
+	dsi_write(msm_host, REG_DSI_CLK_CTRL, clk_ctrl);
+	wmb();
+
+	/* re-arm the engine in the same operating mode */
+	dsi_write(msm_host, REG_DSI_CTRL, ctrl);
+	wmb(); /* make sure dsi controller enabled again */
+
+	DRM_DEBUG_KMS("host soft reset complete, restored CTRL=0x%08x CLK_CTRL=0x%08x\n",
+		      ctrl, clk_ctrl);
 }
 
 static void dsi_op_mode_config(struct msm_dsi_host *msm_host,
@@ -1879,6 +2026,26 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 {
 	int ret;
 
+	/*
+	 * The standard derivation below is what the board was measured working
+	 * with, not the vendor PPS blob.
+	 *
+	 * Earlier rounds short-circuited here whenever the panel had parsed a
+	 * vendor PPS table into this struct (initial_xmit_delay doubles as the
+	 * "panel configured this" flag), on the theory that the DDIC decodes
+	 * against exactly those bytes.  The verified profile of this panel says
+	 * otherwise: the working boot ran DRM_DSC_1_1_PRE_SCR with
+	 * initial_xmit_delay 512, initial_dec_delay 556, nfl_bpg_offset 848,
+	 * slice_bpg_offset 781, initial_offset 6144, final_offset 4336,
+	 * scale_increment 778 -- i.e. the standard table, not the blob's
+	 * 341/2048/4424.  The rate-control model is what both the DPU encoder
+	 * and the DDIC decoder step through, so a model mismatch degrades the
+	 * decoded picture everywhere the quantiser climbs.
+	 *
+	 * first_line_bpg_offset is not set here: DRM_DSC_1_1_PRE_SCR gives 12
+	 * for this geometry, and the panel's own prepare() raises it to 15,
+	 * which is the value the working boot ran.
+	 */
 	if (dsc->bits_per_pixel & 0xf) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "DSI does not support fractional bits_per_pixel\n");
 		return -EINVAL;
@@ -2529,7 +2696,13 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	}
 
 	dsi_timing_setup(msm_host, is_bonded_dsi);
-	dsi_sw_reset(msm_host);
+	/*
+	 * Round CA: reset from a clean, never-armed state on the handover path
+	 * rather than dsi_sw_reset()'s restore-the-old-CTRL behaviour, which
+	 * re-arms the bootloader's stale engine mode.  dsi_ctrl_enable() below
+	 * programs REG_DSI_CTRL from scratch.
+	 */
+	dsi_pre_cmd_engine_reset(msm_host);
 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
 
 	msm_host->power_on = true;

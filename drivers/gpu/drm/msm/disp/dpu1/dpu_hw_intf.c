@@ -377,13 +377,15 @@ static int dpu_hw_intf_enable_te(struct dpu_hw_intf *intf,
 
 	c = &intf->hw;
 
-	cfg = BIT(19); /* VSYNC_COUNTER_EN */
+	/* Disable the counter while programming single-buffered TE registers. */
+	cfg = 0;
 	if (te->hw_vsync_mode)
 		cfg |= BIT(20);
 
 	cfg |= te->vsync_count;
 
 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
+	wmb(); /* Disable the counter before updating its parameters. */
 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_HEIGHT, te->sync_cfg_height);
 	DPU_REG_WRITE(c, INTF_TEAR_VSYNC_INIT_VAL, te->vsync_init_val);
 	DPU_REG_WRITE(c, INTF_TEAR_RD_PTR_IRQ, te->rd_ptr_irq);
@@ -391,6 +393,10 @@ static int dpu_hw_intf_enable_te(struct dpu_hw_intf *intf,
 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_THRESH,
 			((te->sync_threshold_continue << 16) |
 			 te->sync_threshold_start));
+	cfg |= BIT(19); /* VSYNC_COUNTER_EN */
+	DPU_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
+	wmb(); /* Enable the counter before updating the write count. */
+
 	DPU_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT,
 			(te->start_pos + te->sync_threshold_start + 1));
 
@@ -591,6 +597,7 @@ static void dpu_hw_intf_program_intf_cmd_cfg(struct dpu_hw_intf *intf,
 					     struct dpu_hw_intf_cmd_mode_cfg *cmd_mode_cfg)
 {
 	u32 intf_cfg2 = DPU_REG_READ(&intf->hw, INTF_CONFIG2);
+	intf_cfg2 &= ~(INTF_CFG2_DCE_DATA_COMPRESS | INTF_CFG2_DATABUS_WIDEN);
 
 	if (cmd_mode_cfg->data_compress)
 		intf_cfg2 |= INTF_CFG2_DCE_DATA_COMPRESS;
@@ -599,6 +606,21 @@ static void dpu_hw_intf_program_intf_cmd_cfg(struct dpu_hw_intf *intf,
 		intf_cfg2 |= INTF_CFG2_DATABUS_WIDEN;
 
 	DPU_REG_WRITE(&intf->hw, INTF_CONFIG2, intf_cfg2);
+
+	{
+		static bool intf_cmd_readback_done;
+		if (!intf_cmd_readback_done) {
+			intf_cmd_readback_done = true;
+			pr_info("INTF_CMD_CFG_DBG intf=%d "
+				"CONFIG2=0x%x CONFIG=0x%x "
+				"compress=%d widebus=%d\n",
+				intf->idx,
+				intf_cfg2,
+				DPU_REG_READ(&intf->hw, INTF_CONFIG),
+				cmd_mode_cfg->data_compress,
+				cmd_mode_cfg->wide_bus_en);
+		}
+	}
 }
 
 /**

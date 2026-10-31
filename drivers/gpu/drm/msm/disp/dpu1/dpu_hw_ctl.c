@@ -622,6 +622,25 @@ static void dpu_hw_ctl_intf_cfg_v1(struct dpu_hw_ctl *ctx,
 
 	if (cfg->cdm)
 		DPU_REG_WRITE(c, CTL_CDM_ACTIVE, cfg->cdm);
+
+	{
+		static bool ctl_intf_readback_done;
+		if (!ctl_intf_readback_done) {
+			ctl_intf_readback_done = true;
+			pr_info("CTL_INTF_CFG_DBG cpu=%d ctl=%d "
+				"TOP=0x%x INTF_ACTIVE=0x%x DSC_ACTIVE=0x%x "
+				"MERGE3D_ACTIVE=0x%x intf=%d dsc=0x%x "
+				"mode_3d=%d master=%d compress=%d\n",
+				smp_processor_id(), ctx->idx - CTL_0,
+				DPU_REG_READ(c, CTL_TOP),
+				DPU_REG_READ(c, CTL_INTF_ACTIVE),
+				DPU_REG_READ(c, CTL_DSC_ACTIVE),
+				DPU_REG_READ(c, CTL_MERGE_3D_ACTIVE),
+				cfg->intf, cfg->dsc,
+				cfg->mode_3d, cfg->intf_master,
+				cfg->intf_mode_sel);
+		}
+	}
 }
 
 static void dpu_hw_ctl_intf_cfg(struct dpu_hw_ctl *ctx,

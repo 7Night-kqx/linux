@@ -610,6 +610,9 @@ void dpu_encoder_helper_split_config(
 	if (phys_enc->split_role == ENC_ROLE_MASTER) {
 		DPU_DEBUG_ENC(dpu_enc, "enable %d\n", cfg.en);
 
+		pr_info("SPLIT_PIPE_DBG cpu=%d master en=%d mode=%d intf=%d flush_en=%d\n",
+			smp_processor_id(), cfg.en, cfg.mode, cfg.intf, cfg.split_flush_en);
+
 		if (hw_mdptop->ops.setup_split_pipe)
 			hw_mdptop->ops.setup_split_pipe(hw_mdptop, &cfg);
 	}
@@ -1753,6 +1756,8 @@ static void dpu_encoder_helper_hw_reset(struct dpu_encoder_phys *phys_enc)
 	struct dpu_hw_ctl *ctl;
 	int rc;
 	struct drm_encoder *drm_enc;
+	struct msm_drm_private *priv;
+	int index;
 
 	dpu_enc = to_dpu_encoder_virt(phys_enc->parent);
 	ctl = phys_enc->hw_ctl;
@@ -1768,6 +1773,21 @@ static void dpu_encoder_helper_hw_reset(struct dpu_encoder_phys *phys_enc)
 	if (rc) {
 		DPU_ERROR_ENC(dpu_enc, "ctl %d reset failure\n",  ctl->idx);
 		msm_disp_snapshot_state(drm_enc->dev);
+	}
+
+	/*
+	 * CTL_SW_RESET recovers the MDP side, but the DSI cmd engine can
+	 * remain wedged (STATUS0 CMD_MODE_ENGINE_BUSY|CMD_MODE_MDP_BUSY)
+	 * after a kickoff timeout.  Without a DSI soft reset the next
+	 * frame starts into a controller that still believes the previous
+	 * transfer is in flight, producing permanent trickle glitch.
+	 * Mirror vendor sde_encoder_helper_hw_reset() which calls
+	 * connector->ops.soft_reset() here.
+	 */
+	if (dpu_enc->disp_info.intf_type == INTF_DSI) {
+		priv = drm_enc->dev->dev_private;
+		index = dpu_enc->disp_info.h_tile_instance[0];
+		msm_dsi_soft_reset(priv->kms->dsi[index]);
 	}
 
 	phys_enc->enable_state = DPU_ENC_ENABLED;
@@ -1966,25 +1986,85 @@ static u32
 dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
 				  u32 enc_ip_width)
 {
-	int ssm_delay, total_pixels, soft_slice_per_enc;
+	int soft_slice_per_enc;
 
 	soft_slice_per_enc = enc_ip_width / dsc->slice_width;
 
 	/*
-	 * minimum number of initial line pixels is a sum of:
-	 * 1. sub-stream multiplexer delay (83 groups for 8bpc,
-	 *    91 for 10 bpc) * 3
-	 * 2. for two soft slice cases, add extra sub-stream multiplexer * 3
-	 * 3. the initial xmit delay
-	 * 4. total pipeline delay through the "lock step" of encoder (47)
-	 * 5. 6 additional pixels as the output of the rate buffer is
-	 *    48 bits wide
+	 * Round AU: the vendor model. The Qualcomm display driver
+	 * (_dce_dsc_initial_line_calc, sde_encoder_dce.c) computes the
+	 * encoder start-up line budget from the Hardent core RTL
+	 * parameters -- sub-stream multiplexer, output buffer latency
+	 * and multi-half-slice budget -- while mainline used the
+	 * simplified pre-1.2 formula (ssm*3 + xmit + 47). For this
+	 * panel (bpc 10, 8bpp, 600px slices, DSC merge) the simplified
+	 * formula yields 2 initial lines, the vendor model 3: the
+	 * one-line shortfall truncates the stream head and corrupts
+	 * every following slice boundary (slice-period horizontal
+	 * stripes, gray-level noise -- AQ boot forensics). The model
+	 * below is the vendor computation verbatim for the 444 path.
 	 */
-	ssm_delay = ((dsc->bits_per_component < 10) ? 84 : 92);
-	total_pixels = ssm_delay * 3 + dsc->initial_xmit_delay + 47;
-	if (soft_slice_per_enc > 1)
-		total_pixels += (ssm_delay * 3);
-	return DIV_ROUND_UP(total_pixels, dsc->slice_width);
+	{
+		int bpc = dsc->bits_per_component;
+		int bpp = dsc->bits_per_pixel >> 4;
+		bool native_422 = dsc->native_422;
+		bool native_420 = dsc->native_420;
+		int multiplex_mode_enable = 0, split_panel_enable = 0;
+		int rtl_max_bpc = 10, rtl_output_data_width = 64;
+		int pipeline_latency = 28;
+		int max_ssm_delay, max_se_size, max_muxword_size;
+		int compress_bpp_group, obuf_latency, input_ssm_out_latency;
+		int base_hs_latency, chunk_bits, ob_data_width;
+		int output_rate_extra_budget_bits;
+		int multi_hs_extra_latency, mux_word_size;
+		int ob_data_width_4comps, ob_data_width_3comps;
+		int output_rate_ratio_complement, container_slice_width;
+		int rtl_num_components, multi_hs_c, multi_hs_d;
+
+		/* DSC merge topology: MULTIPLEX with 2 DSC blocks over 1 intf. */
+		if (enc_ip_width * 2 == dsc->pic_width)
+			multiplex_mode_enable = 1;
+		if (dsc->slice_count * dsc->slice_width == dsc->pic_width &&
+		    dsc->slice_count > 1)
+			split_panel_enable = 1;
+		container_slice_width = (native_422 ?
+				dsc->slice_width / 2 : dsc->slice_width);
+		max_muxword_size = (rtl_max_bpc >= 12) ? 64 : 48;
+		max_se_size = 4 * (rtl_max_bpc + 1);
+		max_ssm_delay = max_se_size + max_muxword_size - 1;
+		mux_word_size = (bpc >= 12) ? 64 : 48;
+		compress_bpp_group = native_422 ? (2 * bpp) : bpp;
+		input_ssm_out_latency = pipeline_latency +
+			3 * (max_ssm_delay + 2) * soft_slice_per_enc;
+		rtl_num_components = (native_420 || native_422) ? 4 : 3;
+		ob_data_width_4comps = (rtl_output_data_width >=
+				(2 * max_muxword_size)) ?
+				rtl_output_data_width : (2 * rtl_output_data_width);
+		ob_data_width_3comps = (rtl_output_data_width >=
+				max_muxword_size) ?
+				rtl_output_data_width : 2 * rtl_output_data_width;
+		ob_data_width = (rtl_num_components == 4) ?
+			ob_data_width_4comps : ob_data_width_3comps;
+		obuf_latency = DIV_ROUND_UP((9 * ob_data_width + mux_word_size),
+				compress_bpp_group) + 1;
+		base_hs_latency = dsc->initial_xmit_delay +
+			input_ssm_out_latency + obuf_latency;
+		chunk_bits = 8 * dsc->slice_chunk_size;
+		output_rate_ratio_complement = ob_data_width - compress_bpp_group;
+		output_rate_extra_budget_bits =
+			(output_rate_ratio_complement * chunk_bits) >>
+			((ob_data_width == 128) ? 7 : 6);
+		multi_hs_c = split_panel_enable * multiplex_mode_enable;
+		multi_hs_d = (soft_slice_per_enc > 1) *
+			(ob_data_width > compress_bpp_group);
+		multi_hs_extra_latency = multi_hs_c ?
+				DIV_ROUND_UP(chunk_bits, compress_bpp_group) :
+				(multi_hs_d ? DIV_ROUND_UP(chunk_bits, compress_bpp_group) :
+					 DIV_ROUND_UP(output_rate_extra_budget_bits,
+						 compress_bpp_group));
+		return DIV_ROUND_UP((base_hs_latency + multi_hs_extra_latency),
+				container_slice_width);
+	}
 }
 
 static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
@@ -2016,6 +2096,7 @@ static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
 static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 				 struct drm_dsc_config *dsc)
 {
+	static bool dsc_merge_dbg_printed;
 	struct dpu_encoder_phys *enc_master = dpu_enc->cur_master;
 	struct dpu_hw_ctl *ctl = enc_master->hw_ctl;
 	struct dpu_hw_dsc *hw_dsc[MAX_CHANNELS_PER_ENC];
@@ -2054,9 +2135,70 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 	enc_ip_w = intf_ip_w / num_dsc;
 	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
 
+	if (!dsc_merge_dbg_printed) {
+		dsc_merge_dbg_printed = true;
+		pr_info("DSC_MERGE_DBG cpu=%d num_dsc=%d mode=0x%x pic_w=%d slice_w=%d "
+			"slice_cnt=%d chunk=%d enc_ip_w=%d init_lines=%d bpp=%d.%d "
+			"convert_rgb=%d n422=%d n420=%d bpred=%d\n",
+			smp_processor_id(), num_dsc, dsc_common_mode,
+			dsc->pic_width, dsc->slice_width, dsc->slice_count,
+			dsc->slice_chunk_size, enc_ip_w, initial_lines,
+			dsc->bits_per_component, dsc->bits_per_pixel,
+			dsc->convert_rgb, dsc->native_422, dsc->native_420,
+			dsc->block_pred_enable);
+	}
+
 	for (i = 0; i < num_dsc; i++)
 		dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i], hw_pp[i],
 					 dsc, dsc_common_mode, initial_lines);
+
+	{
+		static bool dsc_reg_readback_done;
+		if (!dsc_reg_readback_done && hw_dsc[0]) {
+			struct dpu_hw_blk_reg_map *hw = &hw_dsc[0]->hw;
+			const struct dpu_dsc_sub_blks *sblk = hw_dsc[0]->caps->sblk;
+			u32 cnf, cfg0, cfg1, main_conf0, main_conf1;
+			u32 pict0, pict1, slice0, slice1, misc0, misc1;
+			u32 enc_df0, enc_df1;
+
+			dsc_reg_readback_done = true;
+
+			cnf = DPU_REG_READ(hw, 0x00); /* DSC_CMN_MAIN_CNF */
+
+			enc_df0 = DPU_REG_READ(hw, sblk->enc.base + 0x00);
+			main_conf0 = DPU_REG_READ(hw, sblk->enc.base + 0x30);
+			pict0 = DPU_REG_READ(hw, sblk->enc.base + 0x34);
+			slice0 = DPU_REG_READ(hw, sblk->enc.base + 0x38);
+			misc0 = DPU_REG_READ(hw, sblk->enc.base + 0x3C);
+			cfg0 = DPU_REG_READ(hw, sblk->ctl.base + 0x04);
+
+			if (num_dsc > 1 && hw_dsc[1]) {
+				struct dpu_hw_blk_reg_map *hw1 = &hw_dsc[1]->hw;
+				const struct dpu_dsc_sub_blks *sblk1 = hw_dsc[1]->caps->sblk;
+
+				enc_df1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x00);
+				main_conf1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x30);
+				pict1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x34);
+				slice1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x38);
+				misc1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x3C);
+				cfg1 = DPU_REG_READ(hw1, sblk1->ctl.base + 0x04);
+			} else {
+				enc_df1 = main_conf1 = pict1 = slice1 = misc1 = cfg1 = 0;
+			}
+
+			pr_info("DSC_REG_READBACK cpu=%d\n"
+				"  DSC_CMN_MAIN_CNF=0x%x\n"
+				"  DSC0_ENC_DF_CTRL=0x%x DSC0_MAIN_CONF=0x%x\n"
+				"  DSC0_PICTURE=0x%x DSC0_SLICE=0x%x DSC0_MISC=0x%x\n"
+				"  DSC0_CFG=0x%x\n"
+				"  DSC1_ENC_DF_CTRL=0x%x DSC1_MAIN_CONF=0x%x\n"
+				"  DSC1_PICTURE=0x%x DSC1_SLICE=0x%x DSC1_MISC=0x%x\n"
+				"  DSC1_CFG=0x%x\n",
+				smp_processor_id(), cnf,
+				enc_df0, main_conf0, pict0, slice0, misc0, cfg0,
+				enc_df1, main_conf1, pict1, slice1, misc1, cfg1);
+		}
+	}
 }
 
 /**

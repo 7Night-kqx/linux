@@ -123,6 +123,7 @@ void msm_dsi_host_snapshot(struct msm_disp_state *disp_state, struct mipi_dsi_ho
 void msm_dsi_host_test_pattern_en(struct mipi_dsi_host *host);
 struct drm_dsc_config *msm_dsi_host_get_dsc_config(struct mipi_dsi_host *host);
 bool msm_dsi_host_is_wide_bus_enabled(struct mipi_dsi_host *host);
+void msm_dsi_host_soft_reset(struct mipi_dsi_host *host);
 
 /* dsi phy */
 struct msm_dsi_phy;

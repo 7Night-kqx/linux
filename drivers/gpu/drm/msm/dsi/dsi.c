@@ -22,6 +22,21 @@ bool msm_dsi_wide_bus_enabled(struct msm_dsi *msm_dsi)
 	return msm_dsi_host_is_wide_bus_enabled(msm_dsi->host);
 }
 
+/*
+ * msm_dsi_soft_reset() -- runtime recovery entry point for the DPU timeout path.
+ *
+ * Called from dpu_encoder_helper_hw_reset() after CTL_SW_RESET has recovered
+ * the MDP side.  Clears a wedged cmd engine (STATUS0 CMD_MODE_ENGINE_BUSY|
+ * CMD_MODE_MDP_BUSY) so the next frame starts into a clean controller.
+ */
+void msm_dsi_soft_reset(struct msm_dsi *msm_dsi)
+{
+	if (!msm_dsi || !msm_dsi->host)
+		return;
+
+	msm_dsi_host_soft_reset(msm_dsi->host);
+}
+
 static int dsi_get_phy(struct msm_dsi *msm_dsi)
 {
 	struct platform_device *pdev = msm_dsi->pdev;

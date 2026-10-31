@@ -27,9 +27,13 @@ static void dpu_hw_merge_3d_setup_3d_mode(struct dpu_hw_merge_3d *merge_3d,
 	if (mode_3d == BLEND_3D_NONE) {
 		DPU_REG_WRITE(c, MERGE_3D_MODE, 0);
 		DPU_REG_WRITE(c, MERGE_3D_MUX, 0);
+		pr_info("MERGE_3D_DBG cpu=%d idx=%d mode=NONE (wrote 0)\n",
+			smp_processor_id(), merge_3d->idx);
 	} else {
 		data = BIT(0) | ((mode_3d - 1) << 1);
 		DPU_REG_WRITE(c, MERGE_3D_MODE, data);
+		pr_info("MERGE_3D_DBG cpu=%d idx=%d mode=%d data=0x%x\n",
+			smp_processor_id(), merge_3d->idx, mode_3d, data);
 	}
 }
 

@@ -143,10 +143,12 @@ enum {
 /**
  * DSC sub-blocks/features
  * @DPU_DSC_NATIVE_42x_EN     Supports NATIVE_422_EN and NATIVE_420_EN encoding
+ * @DPU_DSC_FULL_ICH_PREC     Supports full ICH error precision above 8 bpc
  * @DPU_DSC_MAX
  */
 enum {
 	DPU_DSC_NATIVE_42x_EN = 0x1,
+	DPU_DSC_FULL_ICH_PREC,
 	DPU_DSC_MAX
 };
 

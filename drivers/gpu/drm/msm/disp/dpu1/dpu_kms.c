@@ -402,7 +402,16 @@ static const struct drm_private_state_funcs dpu_kms_global_state_funcs = {
 
 static void dpu_kms_global_obj_fini(struct dpu_kms *dpu_kms)
 {
-	drm_atomic_private_obj_fini(&dpu_kms->global_state);
+	/* _dpu_kms_hw_destroy() runs from both dpu_kms_hw_init()'s error
+	 * path and dpu_kms_destroy() when msm_drm_init() fails in between,
+	 * and drm_atomic_private_obj_fini() list_del()s unconditionally:
+	 * the second call writes through LIST_POISON1. Guard on funcs,
+	 * which only drm_atomic_private_obj_init() sets.
+	 */
+	if (dpu_kms->global_state.funcs) {
+		drm_atomic_private_obj_fini(&dpu_kms->global_state);
+		dpu_kms->global_state.funcs = NULL;
+	}
 }
 
 static int dpu_kms_parse_data_bus_icc_path(struct dpu_kms *dpu_kms)

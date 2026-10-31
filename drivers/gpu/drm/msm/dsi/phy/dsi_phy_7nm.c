@@ -535,7 +535,28 @@ static int dsi_pll_7nm_vco_prepare(struct clk_hw *hw)
 	if (pll_7nm->slave)
 		writel(0x1, pll_7nm->slave->phy->base + REG_DSI_7nm_PHY_CMN_RBUF_CTRL);
 
+	return 0;
+
 error:
+	/*
+	 * Undo what this function did before it failed. Leaving the PLL
+	 * started and the bias references taken permanently unbalances
+	 * pll_enable_cnt, so every later dsi_pll_disable_pll_bias() stops one
+	 * short of zero: the bias is never actually shut down, the PHY keeps
+	 * state across enable/disable cycles, and the imbalance eventually
+	 * surfaces as "bug: imbalance in disabling PLL bias".
+	 *
+	 * This path is reachable at probe time: registering the PHY's clock
+	 * provider makes the dispcc consumers stop being orphans, and the
+	 * CLK_OPS_PARENT_ENABLE migration in __clk_set_parent_before() then
+	 * prepares this VCO while the PLL is still unconfigured, so the lock
+	 * poll cannot succeed.
+	 */
+	writel(0, pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL);
+	if (pll_7nm->slave)
+		dsi_pll_disable_pll_bias(pll_7nm->slave);
+	dsi_pll_disable_pll_bias(pll_7nm);
+
 	return rc;
 }
 

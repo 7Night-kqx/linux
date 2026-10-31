@@ -372,6 +372,7 @@ static void _dpu_crtc_setup_blend_cfg(struct dpu_crtc_mixer *mixer,
 
 static void _dpu_crtc_program_lm_output_roi(struct drm_crtc *crtc)
 {
+	static bool lm_roi_dbg_printed;
 	struct dpu_crtc_state *crtc_state;
 	int lm_idx;
 
@@ -390,6 +391,35 @@ static void _dpu_crtc_program_lm_output_roi(struct drm_crtc *crtc)
 		cfg.right_mixer = lm_idx & 0x1;
 		cfg.flags = 0;
 		hw_lm->ops.setup_mixer_out(hw_lm, &cfg);
+
+		if (!lm_roi_dbg_printed) {
+			lm_roi_dbg_printed = true;
+			pr_info("LM_ROI_DBG cpu=%d lm=%d out_w=%d out_h=%d right=%d "
+				"bounds=[%d,%d,%d,%d]\n",
+				smp_processor_id(), lm_idx, cfg.out_width, cfg.out_height,
+				cfg.right_mixer, lm_roi->x1, lm_roi->y1, lm_roi->x2, lm_roi->y2);
+		}
+	}
+
+	{
+		static bool lm_reg_readback_done;
+		if (!lm_reg_readback_done && crtc_state->num_mixers >= 2) {
+			struct dpu_hw_blk_reg_map *c0 = &crtc_state->mixers[0].hw_lm->hw;
+			struct dpu_hw_blk_reg_map *c1 = &crtc_state->mixers[1].hw_lm->hw;
+			u32 op0, out0, op1, out1;
+
+			lm_reg_readback_done = true;
+
+			op0 = DPU_REG_READ(c0, 0x00);  /* LM_OP_MODE */
+			out0 = DPU_REG_READ(c0, 0x04); /* LM_OUT_SIZE */
+			op1 = DPU_REG_READ(c1, 0x00);  /* LM_OP_MODE */
+			out1 = DPU_REG_READ(c1, 0x04); /* LM_OUT_SIZE */
+
+			pr_info("LM_REG_READBACK cpu=%d "
+				"LM0_OP_MODE=0x%x LM0_OUT_SIZE=0x%x "
+				"LM1_OP_MODE=0x%x LM1_OUT_SIZE=0x%x\n",
+				smp_processor_id(), op0, out0, op1, out1);
+		}
 	}
 }
 

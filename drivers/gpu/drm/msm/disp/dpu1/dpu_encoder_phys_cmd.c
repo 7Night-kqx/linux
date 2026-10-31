@@ -40,6 +40,8 @@
 #define DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE	4
 
 static void dpu_encoder_phys_cmd_enable_te(struct dpu_encoder_phys *phys_enc);
+static int dpu_encoder_phys_cmd_control_vblank_irq(struct dpu_encoder_phys *phys_enc,
+		bool enable);
 
 static bool dpu_encoder_phys_cmd_is_master(struct dpu_encoder_phys *phys_enc)
 {
@@ -200,8 +202,31 @@ static int _dpu_encoder_phys_cmd_handle_ppdone_timeout(
 			  cmd_enc->pp_timeout_report_cnt,
 			  atomic_read(&phys_enc->pending_kickoff_cnt));
 		msm_disp_snapshot_state(drm_enc->dev);
-		dpu_core_irq_unregister_callback(phys_enc->dpu_kms,
-				phys_enc->irq[INTR_IDX_RDPTR]);
+		/*
+		 * Cycle the TE/rdptr IRQ registration the same way vendor
+		 * _sde_encoder_phys_cmd_handle_framedone_timeout() does
+		 * (sde_encoder_phys_cmd.c:927): unregister, then immediately
+		 * re-register the callback while holding vblank_ctl_lock.
+		 *
+		 * Do NOT drop the callback via control_vblank_irq(false) here:
+		 * that decrements vblank_refcount to zero and unregisters the
+		 * IRQ, and the only re-registration path is
+		 * dpu_encoder_phys_cmd_irq_enable() which runs on encoder
+		 * (re)enable, not on recovery.  Dropping TE therefore left
+		 * cb:0x0 in core_irq after the first timeout and wedged the
+		 * pipeline for good.  Cycling the registration keeps the
+		 * refcount intact and TE alive across the recovery.
+		 */
+		mutex_lock(&phys_enc->vblank_ctl_lock);
+		if (phys_enc->vblank_refcount && phys_enc->irq[INTR_IDX_RDPTR]) {
+			dpu_core_irq_unregister_callback(phys_enc->dpu_kms,
+					phys_enc->irq[INTR_IDX_RDPTR]);
+			dpu_core_irq_register_callback(phys_enc->dpu_kms,
+					phys_enc->irq[INTR_IDX_RDPTR],
+					dpu_encoder_phys_cmd_te_rd_ptr_irq,
+					phys_enc);
+		}
+		mutex_unlock(&phys_enc->vblank_ctl_lock);
 	}
 
 	atomic_add_unless(&phys_enc->pending_kickoff_cnt, -1, 0);

@@ -1531,6 +1531,56 @@ static void dpu_plane_sspp_update_pipe(struct drm_plane *plane,
 
 	if (pstate->needs_qos_remap)
 		_dpu_plane_set_qos_remap(plane, pipe);
+
+	{
+		static bool sspp_reg_readback_done;
+		if (!sspp_reg_readback_done && layout) {
+			struct dpu_hw_blk_reg_map *hw = &pipe->sspp->hw;
+			u32 rec0_base = pipe->sspp->cap->sblk->sspp_rec0_blk.base;
+			u32 rec1_base = pipe->sspp->cap->sblk->sspp_rec1_blk.base;
+			u32 src_fmt, src_size, src_xy, out_size, out_xy;
+			u32 src0_addr, ystride0, ystride1;
+			u32 cur_src0_addr, src_op_mode, cmn_op_mode;
+
+			sspp_reg_readback_done = true;
+
+			/* Read rec0 registers */
+			src_fmt = DPU_REG_READ(hw, rec0_base + 0x00);
+			src_op_mode = DPU_REG_READ(hw, rec0_base + 0x08);
+			src_size = DPU_REG_READ(hw, rec0_base + 0x14);
+			src_xy = DPU_REG_READ(hw, rec0_base + 0x18);
+			out_size = DPU_REG_READ(hw, rec0_base + 0x1c);
+			out_xy = DPU_REG_READ(hw, rec0_base + 0x20);
+			src0_addr = DPU_REG_READ(hw, rec0_base + 0x4c);
+			ystride0 = DPU_REG_READ(hw, rec0_base + 0x5c);
+			ystride1 = DPU_REG_READ(hw, rec0_base + 0x60);
+			cur_src0_addr = DPU_REG_READ(hw, rec0_base + 0x64);
+			cmn_op_mode = DPU_REG_READ(hw, 0x10);
+
+			pr_info("SSPP_REG_READBACK cpu=%d sspp=%s idx=%d\n"
+				"  REC0: SRC_FMT=0x%x SRC_OP_MODE=0x%x\n"
+				"  SRC_SIZE=0x%x SRC_XY=0x%x OUT_SIZE=0x%x OUT_XY=0x%x\n"
+				"  SRC0_ADDR=0x%x YSTRIDE0=0x%x YSTRIDE1=0x%x\n"
+				"  CUR_SRC0_ADDR=0x%x CMN_OP_MODE=0x%x\n"
+				"  rec0_base=0x%x rec1_base=0x%x\n"
+				"  src_rect=[%d,%d,%d,%d] dst_rect=[%d,%d,%d,%d]\n"
+				"  plane_addr[0]=0x%x pitch[0]=%d format=%p4cc\n",
+				smp_processor_id(), pipe->sspp->cap->name, pipe->sspp->idx,
+				src_fmt, src_op_mode,
+				src_size, src_xy, out_size, out_xy,
+				src0_addr, ystride0, ystride1,
+				cur_src0_addr, cmn_op_mode,
+				rec0_base, rec1_base,
+				pipe_cfg->src_rect.x1, pipe_cfg->src_rect.y1,
+				drm_rect_width(&pipe_cfg->src_rect),
+				drm_rect_height(&pipe_cfg->src_rect),
+				pipe_cfg->dst_rect.x1, pipe_cfg->dst_rect.y1,
+				drm_rect_width(&pipe_cfg->dst_rect),
+				drm_rect_height(&pipe_cfg->dst_rect),
+				layout->plane_addr[0], layout->plane_pitch[0],
+				&fmt->pixel_format);
+		}
+	}
 }
 
 static void dpu_plane_sspp_atomic_update(struct drm_plane *plane,
