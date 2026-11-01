@@ -1170,7 +1170,7 @@ CONFIG_DRIVER_DEFERRED_PROBE_TIMEOUT=0
 #
 CONFIG_FW_LOADER=y
 CONFIG_EXTRA_FIRMWARE="qcom/gen80000_sqe.fw qcom/gen80000_gmu.bin qcom/gen80000_aqe.fw qcom/gen80000_zap.mbn qca/gngbtnv20.bin qca/gngbtfw20.mbn ath12k/WCN7850/hw2.0/amss.bin ath12k/WCN7850/hw2.0/m3.bin ath12k/WCN7850/hw2.0/aux_ucode.bin ath12k/WCN7850/hw2.0/tme_patch.bin ath12k/WCN7850/hw2.0/regdb.bin ath12k/WCN7850/hw2.0/bdf.bin ath12k/WCN7850/hw2.0/board-2.bin ath12k/WCN7850/hw2.0/board.bin ath12k/WCN7850/hw2.0/qdss_trace_config_perf_v2.cfg regulatory.db regulatory.db.p7s qcom/sm8750/Xiaomi-dada-tplg.bin cirrus/cs35l43-dsp1-spk-prot.wmfw cirrus/b-cs35l43-dsp1-spk-prot.wmfw cirrus/t-cs35l43-dsp1-spk-prot.wmfw cirrus/b-cs35l43-dsp1-spk-prot.bin cirrus/t-cs35l43-dsp1-spk-prot.bin"
-CONFIG_EXTRA_FIRMWARE_DIR="/home/night/AI/dada_kernel/firmware"
+CONFIG_EXTRA_FIRMWARE_DIR="firmware"
 # CONFIG_FW_LOADER_USER_HELPER is not set
 # CONFIG_FW_LOADER_COMPRESS is not set
 # CONFIG_FW_UPLOAD is not set
