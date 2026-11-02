@@ -6,6 +6,16 @@
 menu "Near Field Communication (NFC) devices"
 	depends on NFC
 
+config NFC_ST54L_I2C
+	tristate "STMicroelectronics ST54L raw NCI I2C reader"
+	depends on NFC_NCI && I2C && GPIOLIB
+	help
+	  Support ST54L NFC-A readers using raw NCI over I2C, including
+	  CLKREQ interrupt forwarding and the ST MIFARE Classic interface.
+	  This transport does not use the older ST NCI driver's NDLC framing.
+	  Firmware and RF calibration must already be present on the chip.
+	  The module is called st54l_i2c.
+
 config NFC_TRF7970A
 	tristate "Texas Instruments TRF7970a NFC driver"
 	depends on SPI && NFC_DIGITAL && GPIOLIB

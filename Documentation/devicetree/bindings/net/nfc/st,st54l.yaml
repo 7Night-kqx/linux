@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/nfc/st,st54l.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: STMicroelectronics ST54L raw NCI NFC controller
+
+maintainers:
+  - 7Night-kqx <7Night-kqx@users.noreply.github.com>
+
+description: |
+  ST54L uses raw NCI over I2C, without NDLC framing. Firmware and board RF
+  calibration are stored on the controller. CLKREQ is a hardware clock
+  request input to the host and needs routing to the platform clock logic.
+
+properties:
+  compatible:
+    const: st,st54l
+
+  reg:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+    description: Controller reset line; high deasserts reset (reset-enable convention).
+
+  irq-gpios:
+    maxItems: 1
+    description: Active-high controller data-ready signal.
+
+  clkreq-gpios:
+    maxItems: 1
+    description: Active-high hardware clock request from the controller.
+
+required:
+  - compatible
+  - reg
+  - reset-gpios
+  - irq-gpios
+  - clkreq-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        nfc@8 {
+            compatible = "st,st54l";
+            reg = <0x08>;
+            reset-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
+            irq-gpios = <&gpio 75 GPIO_ACTIVE_HIGH>;
+            clkreq-gpios = <&gpio 35 GPIO_ACTIVE_HIGH>;
+        };
+    };

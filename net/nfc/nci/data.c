@@ -213,13 +213,17 @@ EXPORT_SYMBOL(nci_send_data);
 
 static void nci_add_rx_data_frag(struct nci_dev *ndev,
 				 struct sk_buff *skb,
-				 __u8 pbf, __u8 conn_id, __u8 status)
+				 __u8 pbf, __u8 conn_id, int status)
 {
 	int reassembly_len;
 	int err = 0;
 
 	if (status) {
 		err = status;
+		kfree_skb(skb);
+		skb = NULL;
+		kfree_skb(ndev->rx_data_reassembly);
+		ndev->rx_data_reassembly = NULL;
 		goto exit;
 	}
 
@@ -297,6 +301,10 @@ void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb)
 	    ndev->target_active_prot == NFC_PROTO_ISO15693) {
 		/* frame I/F => remove the status byte */
 		pr_debug("frame I/F => remove the status byte\n");
+		if (!skb->len) {
+			nci_add_rx_data_frag(ndev, skb, pbf, conn_id, -EPROTO);
+			return;
+		}
 		status = skb->data[skb->len - 1];
 		skb_trim(skb, (skb->len - 1));
 	}
