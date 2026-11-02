@@ -2160,6 +2160,7 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 			u32 cnf, cfg0, cfg1, main_conf0, main_conf1;
 			u32 pict0, pict1, slice0, slice1, misc0, misc1;
 			u32 enc_df0, enc_df1;
+			u32 swap0 = 0, swap1 = 0;
 
 			dsc_reg_readback_done = true;
 
@@ -2171,6 +2172,7 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 			slice0 = DPU_REG_READ(hw, sblk->enc.base + 0x38);
 			misc0 = DPU_REG_READ(hw, sblk->enc.base + 0x3C);
 			cfg0 = DPU_REG_READ(hw, sblk->ctl.base + 0x04);
+			swap0 = DPU_REG_READ(hw, sblk->ctl.base + 0x08);
 
 			if (num_dsc > 1 && hw_dsc[1]) {
 				struct dpu_hw_blk_reg_map *hw1 = &hw_dsc[1]->hw;
@@ -2182,6 +2184,7 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 				slice1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x38);
 				misc1 = DPU_REG_READ(hw1, sblk1->enc.base + 0x3C);
 				cfg1 = DPU_REG_READ(hw1, sblk1->ctl.base + 0x04);
+				swap1 = DPU_REG_READ(hw1, sblk1->ctl.base + 0x08);
 			} else {
 				enc_df1 = main_conf1 = pict1 = slice1 = misc1 = cfg1 = 0;
 			}
@@ -2190,13 +2193,13 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 				"  DSC_CMN_MAIN_CNF=0x%x\n"
 				"  DSC0_ENC_DF_CTRL=0x%x DSC0_MAIN_CONF=0x%x\n"
 				"  DSC0_PICTURE=0x%x DSC0_SLICE=0x%x DSC0_MISC=0x%x\n"
-				"  DSC0_CFG=0x%x\n"
+				"  DSC0_CFG=0x%x DSC0_DATA_IN_SWAP=0x%x\n"
 				"  DSC1_ENC_DF_CTRL=0x%x DSC1_MAIN_CONF=0x%x\n"
 				"  DSC1_PICTURE=0x%x DSC1_SLICE=0x%x DSC1_MISC=0x%x\n"
 				"  DSC1_CFG=0x%x\n",
 				smp_processor_id(), cnf,
-				enc_df0, main_conf0, pict0, slice0, misc0, cfg0,
-				enc_df1, main_conf1, pict1, slice1, misc1, cfg1);
+				enc_df0, main_conf0, pict0, slice0, misc0, cfg0, swap0,
+				enc_df1, main_conf1, pict1, slice1, misc1, cfg1, swap1);
 		}
 	}
 }

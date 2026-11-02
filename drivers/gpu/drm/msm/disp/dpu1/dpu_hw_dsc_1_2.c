@@ -56,6 +56,10 @@
 #define DSC_CTL                    0x00
 #define DSC_CFG                    0x04
 #define DSC_DATA_IN_SWAP           0x08
+#include <linux/moduleparam.h>
+static uint dsc_data_in_swap = 0xFFFFFFFF;
+module_param(dsc_data_in_swap, uint, 0644);
+MODULE_PARM_DESC(dsc_data_in_swap, "Override DSC_DATA_IN_SWAP (0xFFFFFFFF=no override)");
 #define DSC_CLK_CTRL               0x0C
 
 static int _dsc_calc_output_buf_max_addr(struct dpu_hw_dsc *hw_dsc, int num_softslice)
@@ -122,12 +126,19 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 	if (mode & DSC_MODE_VIDEO)
 		data |= BIT(9);
 
-	data |= (_dsc_calc_output_buf_max_addr(hw_dsc, num_active_slice_per_enc) << 18);
-
-	/* DPU 10.0+ supports full ICH error precision for deep color. */
-	if ((hw_dsc->caps->features & BIT(DPU_DSC_FULL_ICH_PREC)) &&
-	    dsc->bits_per_component > 8)
+	/*
+	 * Round AW-2: vendor sets SDE_DSC_FULL_ICH_PREC for every
+	 * SoC with hw_rev >= A00 (sm8750/sun included, catalog.c
+	 * DSC parse) and then programs ENC_DF_CTRL BIT(12) whenever
+	 * bits_per_component > 8 (sde_hw_dsc_1_2.c).  10bpc dada
+	 * therefore runs with full ICH precision on vendor and with
+	 * the reduced path on mainline -- the only proven ENC_DF_CTRL
+	 * divergence left after AW-1 showed ob_max already matches.
+	 */
+	if (dsc->bits_per_component > 8)
 		data |= BIT(12);
+
+	data |= (_dsc_calc_output_buf_max_addr(hw_dsc, num_active_slice_per_enc) << 18);
 
 	DPU_REG_WRITE(hw, sblk->enc.base + ENC_DF_CTRL, data);
 
@@ -237,10 +248,26 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 		data |= BIT(12);
 	if (mode & DSC_MODE_MULTIPLEX)
 		data |= BIT(13);
-	if (!(mode & DSC_MODE_VIDEO))
+	/*
+	 * Round CG: vendor sde_hw_dsc_1_2.c programs this bit as
+	 * ((mode & DSC_MODE_VIDEO) ? 1 : 0) << 17, i.e. set in VIDEO mode and
+	 * clear in COMMAND mode.  Upstream has the polarity inverted, which
+	 * was harmless for every upstream panel (all of them are video mode)
+	 * but is the single remaining register difference against the vendor
+	 * on this command-mode panel.  The DSC output is geometrically clean
+	 * yet maps colour as (B,G,B), so the window/loader selected by this
+	 * bit is the prime suspect.
+	 */
+	if (mode & DSC_MODE_VIDEO)
 		data |= BIT(17);
 
 	DPU_REG_WRITE(hw, sblk->ctl.base + DSC_CFG, data);
+
+	/* Round DI: override DATA_IN_SWAP for color swap investigation */
+	if (dsc_data_in_swap != 0xFFFFFFFF) {
+		DPU_REG_WRITE(hw, sblk->ctl.base + DSC_DATA_IN_SWAP, dsc_data_in_swap);
+		pr_info("DSC_DATA_IN_SWAP_OVERRIDE val=0x%x\n", dsc_data_in_swap);
+	}
 }
 
 static void dpu_hw_dsc_config_thresh_1_2(struct dpu_hw_dsc *hw_dsc,

@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/syscon.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/of_irq.h>
@@ -33,6 +34,27 @@
 #include "phy/dsi_phy.h"
 
 #define DSI_RESET_TOGGLE_DELAY_MS 20
+
+/*
+ * Round DL: runtime override for the DSI command-engine RGB_SWAP field.
+ *
+ * The vendor DT declares qcom,mdss-dsi-color-order, but it can only carry
+ * one value per build and the vendor only ever programs this field in
+ * video_engine_setup() -- command-mode panels like this one never get it.
+ * Exposing the raw field as a module parameter makes all six encodings
+ * testable from the GRUB cmdline without rebuilding:
+ *
+ *   rgb_swap=N   (0=RGB 1=RBG 2=BGR 3=BRG 4=GRB 5=GBR)
+ *
+ * 0xFFFFFFFF (default) = keep whatever the DT property selected.
+ * module_param is 0444 on purpose: it must be set at boot, and forcing a
+ * boot-time-only value keeps a stray runtime write from silently changing
+ * the colour pipeline under a running compositor.
+ */
+static uint rgb_swap_override = 0xFFFFFFFF;
+module_param(rgb_swap_override, uint, 0444);
+MODULE_PARM_DESC(rgb_swap_override,
+		 "DSI RGB_SWAP field override: 0=RGB 1=RBG 2=BGR 3=BRG 4=GRB 5=GBR, 0xFFFFFFFF=use DT");
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
 
@@ -177,6 +199,10 @@ struct msm_dsi_host {
 	/* lane data parsed via DT */
 	int dlane_swap;
 	int num_data_lanes;
+
+	/* Round DK: vendor DT qcom,mdss-dsi-color-order, applied to the
+	 * DSI_CMD_CFG0 RGB_SWAP field (mainline hardcoded SWAP_RGB). */
+	u32 swap_mode;
 
 	/* from phy DT */
 	bool cphy_mode;
@@ -847,13 +873,21 @@ static void dsi_ctrl_enable(struct msm_dsi_host *msm_host,
 		dsi_write(msm_host, REG_DSI_VID_CFG0, data);
 
 		/* Do not swap RGB colors */
-		data = DSI_VID_CFG1_RGB_SWAP(SWAP_RGB);
+		data = DSI_VID_CFG1_RGB_SWAP(msm_host->swap_mode);
 		dsi_write(msm_host, REG_DSI_VID_CFG1, 0);
 	} else {
 		/* Do not swap RGB colors */
-		data = DSI_CMD_CFG0_RGB_SWAP(SWAP_RGB);
+		data = DSI_CMD_CFG0_RGB_SWAP(msm_host->swap_mode);
 		data |= DSI_CMD_CFG0_DST_FORMAT(dsi_get_cmd_fmt(mipi_fmt));
 		dsi_write(msm_host, REG_DSI_CMD_CFG0, data);
+
+		/* Round DL: read back what the hardware actually latched, so a
+		 * colour sweep can tell "write ignored" from "write had no
+		 * visible effect". */
+		dev_info(&msm_host->pdev->dev,
+			 "CMD_CFG0_DBG swap_mode=%u written=0x%08x readback=0x%08x\n",
+			 msm_host->swap_mode, data,
+			 dsi_read(msm_host, REG_DSI_CMD_CFG0));
 
 		data = DSI_CMD_CFG1_WR_MEM_START(MIPI_DCS_WRITE_MEMORY_START) |
 			DSI_CMD_CFG1_WR_MEM_CONTINUE(
@@ -1869,6 +1903,57 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
 	msm_host->lanes = dsi->lanes;
 	msm_host->format = dsi->format;
 	msm_host->mode_flags = dsi->mode_flags;
+
+	/*
+	 * Round DK: parse the vendor qcom,mdss-dsi-color-order property from
+	 * the panel node.  Upstream hardcodes SWAP_RGB (0) in both the video
+	 * and command engine setup, which happens to match the default, so
+	 * this changes nothing by itself -- it makes the DSI RGB_SWAP field
+	 * reachable from DT so the vendor's declared colour order is actually
+	 * honoured instead of silently ignored.  Vendor only applies it in
+	 * video_engine_setup(); we apply it to the command engine too, which
+	 * is the mode this panel runs in.
+	 */
+	msm_host->swap_mode = SWAP_RGB;
+	if (dsi->dev.of_node) {
+		const char *swap;
+
+		if (!of_property_read_string(dsi->dev.of_node,
+					     "qcom,mdss-dsi-color-order", &swap)) {
+			if (!strcmp(swap, "rgb_swap_rgb"))
+				msm_host->swap_mode = SWAP_RGB;
+			else if (!strcmp(swap, "rgb_swap_rbg"))
+				msm_host->swap_mode = SWAP_RBG;
+			else if (!strcmp(swap, "rgb_swap_brg"))
+				msm_host->swap_mode = SWAP_BRG;
+			else if (!strcmp(swap, "rgb_swap_grb"))
+				msm_host->swap_mode = SWAP_GRB;
+			else if (!strcmp(swap, "rgb_swap_gbr"))
+				msm_host->swap_mode = SWAP_GBR;
+			else
+				dev_warn(&msm_host->pdev->dev,
+					 "Unrecognized color order-%s\n", swap);
+			dev_info(&msm_host->pdev->dev,
+				 "color-order=%s -> swap_mode=%u\n",
+				 swap, msm_host->swap_mode);
+		}
+	}
+
+	/* Round DL: module parameter wins over DT so a single image can sweep
+	 * every encoding from the GRUB cmdline. */
+	if (rgb_swap_override != 0xFFFFFFFF) {
+		if (rgb_swap_override > SWAP_GBR) {
+			dev_warn(&msm_host->pdev->dev,
+				 "rgb_swap=%u out of range (0..%d), ignoring\n",
+				 rgb_swap_override, SWAP_GBR);
+		} else {
+			dev_info(&msm_host->pdev->dev,
+				 "rgb_swap override: %u -> %u\n",
+				 msm_host->swap_mode, rgb_swap_override);
+			msm_host->swap_mode = rgb_swap_override;
+		}
+	}
+
 	if (dsi->dsc) {
 		msm_host->dsc = dsi->dsc;
 		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
@@ -2027,25 +2112,18 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	int ret;
 
 	/*
-	 * The standard derivation below is what the board was measured working
-	 * with, not the vendor PPS blob.
-	 *
-	 * Earlier rounds short-circuited here whenever the panel had parsed a
-	 * vendor PPS table into this struct (initial_xmit_delay doubles as the
-	 * "panel configured this" flag), on the theory that the DDIC decodes
-	 * against exactly those bytes.  The verified profile of this panel says
-	 * otherwise: the working boot ran DRM_DSC_1_1_PRE_SCR with
-	 * initial_xmit_delay 512, initial_dec_delay 556, nfl_bpg_offset 848,
-	 * slice_bpg_offset 781, initial_offset 6144, final_offset 4336,
-	 * scale_increment 778 -- i.e. the standard table, not the blob's
-	 * 341/2048/4424.  The rate-control model is what both the DPU encoder
-	 * and the DDIC decoder step through, so a model mismatch degrades the
-	 * decoded picture everywhere the quantiser climbs.
-	 *
-	 * first_line_bpg_offset is not set here: DRM_DSC_1_1_PRE_SCR gives 12
-	 * for this geometry, and the panel's own prepare() raises it to 15,
-	 * which is the value the working boot ran.
+	 * Round AM: panel-provided DSC config wins. A panel whose on-command
+	 * carries its own DSC table (parsed by the panel driver into dsc)
+	 * runs its DDIC decoder on exactly those parameters; the upstream
+	 * RC-table derivation below would overwrite every rate-control field
+	 * with standard-table values and the encoder would disagree with the
+	 * decoder (stripes / torn image). initial_xmit_delay is zero in a
+	 * freshly-zeroed drm_dsc_config and non-zero in a parsed vendor
+	 * table, so it doubles as the "panel configured this" flag.
 	 */
+	if (dsc->initial_xmit_delay)
+		return 0;
+
 	if (dsc->bits_per_pixel & 0xf) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "DSI does not support fractional bits_per_pixel\n");
 		return -EINVAL;

@@ -543,3 +543,4 @@ module_exit(mca_bmd_exit);
 MODULE_DESCRIPTION("battery missing detection");
 MODULE_AUTHOR("lvxiaofeng@xiaomi.com");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

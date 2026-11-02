@@ -1176,6 +1176,18 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 
 	pr_info("dpu hardware revision:0x%x\n", core_rev);
 
+	/* Round DI: dump DSC/DSPP/INTF reset defaults */
+	{
+		pr_info("DSC0_CTL[0x00]=0x%x DSC0_CFG[0x04]=0x%x DSC0_DATA_IN_SWAP[0x08]=0x%x\n",
+			readl_relaxed(dpu_kms->mmio + 0x80000),
+			readl_relaxed(dpu_kms->mmio + 0x80004),
+			readl_relaxed(dpu_kms->mmio + 0x80008));
+		pr_info("DSC1_CTL[0x00]=0x%x DSC1_CFG[0x04]=0x%x DSC1_DATA_IN_SWAP[0x08]=0x%x\n",
+			readl_relaxed(dpu_kms->mmio + 0x81000),
+			readl_relaxed(dpu_kms->mmio + 0x81004),
+			readl_relaxed(dpu_kms->mmio + 0x81008));
+	}
+
 	dpu_kms->catalog = of_device_get_match_data(dev->dev);
 	if (!dpu_kms->catalog) {
 		DPU_ERROR("device config not known!\n");

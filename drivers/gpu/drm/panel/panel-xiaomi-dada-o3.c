@@ -932,37 +932,50 @@ static int m2582_backlight_update(struct backlight_device *bl)
  * TE, so only the mode name matters -- prepare() reads it for the rate.
  */
 static const struct drm_display_mode m2582_mode_90 = {
-	.clock = 627126,
+	/*
+	 * Same porches as the 120 Hz mode; the clock is that geometry at 90 Hz.
+	 * The panel scans at whichever rate its timing-switch set selected and
+	 * the SoC follows TE, so only the mode name matters to prepare().
+	 */
+	.clock = 313977,
 	.hdisplay = 1200,
-	.hsync_start = 1220,
-	.hsync_end = 1224,
-	.htotal = 1244,
+	.hsync_start = 1216,
+	.hsync_end = 1232,
+	.htotal = 1264,
 	.vdisplay = 2670,
-	.vsync_start = 3604,
-	.vsync_end = 3607,
-	.vtotal = 3648,
+	.vsync_start = 2715,
+	.vsync_end = 2723,
+	.vtotal = 2760,
 	.width_mm = 65,
 	.height_mm = 148,
 };
 
 static const struct drm_display_mode m2582_mode = {
 	/*
-	 * The pixel clock sets the DSI link rate and must cover the panel's own
-	 * bandwidth: 1200 * 2670 * 120 Hz at 8 bpp (DSC) over four lanes is
-	 * 769 Mbps per lane. The factory panel node declares
-	 * qcom,mdss-dsi-panel-clockrate = 0x419fed40; worked back through this
-	 * driver's clock chain that gives the value below. The visible timings
-	 * are unchanged.
+	 * Vendor timing@normal_120hz_index_00, read straight out of the
+	 * factory node: h-pulse-width 16, h-back-porch 32, h-front-porch 16
+	 * (htotal 1264); v-pulse-width 8, v-back-porch 37, v-front-porch 45
+	 * (vtotal 2760).  The clock below is that geometry at 120 Hz.
+	 *
+	 * This is also what the previous port ran, and what a live Android
+	 * boot reports: mode 1200x2670 @ 120.00001 Hz.
+	 *
+	 * Note mainline derives the DSI link rate from mode->clock, so this
+	 * value has to satisfy the compressed stream too: at 8 bpp over four
+	 * lanes 1200x2670@120 needs 769 Mbps/lane, and this geometry with
+	 * RGB101010 gives 954 Mbps -- the same numbers the vendor's
+	 * qcom,mdss-dsi-panel-clockrate = <0x448b9b80> (1.15 Gbps/lane)
+	 * comfortably covers.
 	 */
-	.clock = 627126,
+	.clock = 418636,
 	.hdisplay = 1200,
-	.hsync_start = 1220,
-	.hsync_end = 1224,
-	.htotal = 1244,
+	.hsync_start = 1216,
+	.hsync_end = 1232,
+	.htotal = 1264,
 	.vdisplay = 2670,
-	.vsync_start = 2703,
-	.vsync_end = 2705,
-	.vtotal = 2736,
+	.vsync_start = 2715,
+	.vsync_end = 2723,
+	.vtotal = 2760,
 	.width_mm = 65,
 	.height_mm = 148,
 };
@@ -1172,24 +1185,51 @@ static int m2582_probe(struct mipi_dsi_device *dsi)
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
 	dsi->lanes = 4;
-	dsi->format = MIPI_DSI_FMT_RGB888;
 	/*
-	 * Command mode, as the factory node is: its label is
-	 * qcom,mdss_dsi_meizu_amoled_m2582_vtdr6130a_dsc_cmd and its panel-type is
-	 * "dsi_cmd_mode".
+	 * Match the vendor runtime: read back from a live Android boot on this
+	 * board, DSI_CMD_CFG0 = 0x00000009, i.e. DST_FORMAT = 9 = RGB101010
+	 * (30 bpp), with the vendor node's qcom,mdss-dsi-bpp = <0x1e> agreeing.
+	 * RGB888 here was a guess that nothing on this board supports: it
+	 * changes the link rate and the packet geometry away from what the
+	 * DDIC is known to accept.
 	 */
-	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
-		MIPI_DSI_CLOCK_NON_CONTINUOUS;
+	dsi->format = MIPI_DSI_FMT_RGB101010;
+	/*
+	 * Command mode, as the vendor node is: panel-type is "dsi_cmd_mode".
+	 *
+	 * EOT: the vendor node sets qcom,mdss-dsi-tx-eot-append, and
+	 * dsi_ctrl_hw_cmn.c programs DSI_EOT_PACKET_CTRL from append_tx_eot.
+	 * So TX EOT must be appended -- MIPI_DSI_MODE_NO_EOT_PACKET must NOT
+	 * be set here.
+	 *
+	 * Clock lane: the vendor node does not set
+	 * qcom,mdss-dsi-force-clock-lane-hs, so the vendor driver leaves the
+	 * clock lane non-continuous and gates it between transfers.
+	 */
+	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS;
+	/*
+	 * Both DSC slices go out in one packet, as the vendor does:
+	 * qcom,mdss-dsc-slice-per-pkt = <2>, and sde_dsc_helper.c derives
+	 * pkt_per_line = slice_per_intf / slice_per_pkt = 1 with
+	 * bytes_per_pkt = bytes_in_slice * 2 = 1200.  A live Android boot
+	 * agrees: DSI_CMD_MDP_STREAM0_TOTAL reads H_TOTAL = 1201 = 1200 + 1,
+	 * i.e. one packet of two slices per line.
+	 *
+	 * In mainline that is MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT, which makes
+	 * the host use dsc_slice_per_pkt = dsc->slice_count instead of 1.
+	 */
+	dsi->mode_flags |= MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT;
 	ctx->dsc.dsc_version_major = 1;
 	ctx->dsc.dsc_version_minor = 2;
 	ctx->dsc.slice_height = 30;
 	/* The factory geometry: two 600-pixel DSC slices per line. */
 	ctx->dsc.slice_count = 2;
 	ctx->dsc.slice_width = 1200 / ctx->dsc.slice_count;
-	ctx->dsc.slice_chunk_size =
-		DIV_ROUND_UP(ctx->dsc.slice_width * ctx->dsc.bits_per_pixel, 8 * 16);
 	ctx->dsc.bits_per_component = 10;
 	ctx->dsc.bits_per_pixel = 8 << 4;
+	/* Needs bits_per_pixel above; the host re-derives it on every modeset. */
+	ctx->dsc.slice_chunk_size =
+		DIV_ROUND_UP(ctx->dsc.slice_width * ctx->dsc.bits_per_pixel, 8 * 16);
 	ctx->dsc.block_pred_enable = true;
 	dsi->dsc = &ctx->dsc;
 	/*

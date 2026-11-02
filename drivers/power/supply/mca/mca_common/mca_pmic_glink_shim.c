@@ -67,3 +67,6 @@ int pmic_glink_write(struct pmic_glink_client *client, void *data, size_t len)
 	return pmic_glink_send(client, data, len);
 }
 EXPORT_SYMBOL_GPL(pmic_glink_write);
+
+MODULE_DESCRIPTION("MCA pmic glink shim");
+MODULE_LICENSE("GPL");
