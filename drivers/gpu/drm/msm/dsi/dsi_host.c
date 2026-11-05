@@ -1054,7 +1054,7 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 
 	pr_info("DSI_TIMING_DBG cpu=%d id=%d bonded=%d mode=%dx%d "
 		"htotal=%d vtotal=%d hdisp=%d dsc=%s chunk=%d "
-		"slice_cnt=%d slice_per_pkt=%d flags=0x%lx\n",
+		"slice_cnt=%d slice_per_pkt=%d flags=0x%x\n",
 		smp_processor_id(), msm_host->id, is_bonded_dsi,
 		mode->hdisplay, mode->vdisplay, h_total, v_total,
 		hdisplay, msm_host->dsc ? "yes" : "no",
