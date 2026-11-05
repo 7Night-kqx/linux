@@ -2563,3 +2563,40 @@
 		#size-cells = <0>;
 	};
 };
+
+/* Modem, cellular data and shared WLAN supply configuration. */
+#include "dada-mpss-enable.dtsi"
+#include "dada-ipa-enable.dtsi"
+
+/* This phone's stock CNSS DTBO requests at least 876 mV on S4D/S5F and
+ * 1312 mV on S7I. The WCN PMU enables its inputs without requesting a
+ * voltage, so keep the shared rails above these native WLAN minima.
+ */
+&vreg_s4d_0p85 {
+	regulator-min-microvolt = <876000>;
+};
+
+&vreg_s5f_0p85 {
+	regulator-min-microvolt = <876000>;
+};
+
+&vreg_s7i_1p2 {
+	regulator-min-microvolt = <1312000>;
+};
+
+/* RMTFS has 4 MiB usable memory plus a guard page at each end. The
+ * successful reference probe checked client 1 / VMID 15 and a dynamically
+ * allocated, no-map reservation below 4 GiB. Avoid a guessed fixed address.
+ */
+&{/reserved-memory} {
+	rmtfs_mem: rmtfs {
+		compatible = "qcom,rmtfs-mem";
+		size = <0x0 0x402000>;
+		alignment = <0x0 0x1000>;
+		alloc-ranges = <0x0 0x80000000 0x0 0x80000000>;
+		no-map;
+		qcom,client-id = <1>;
+		qcom,vmid = <15>;
+		qcom,use-guard-pages;
+	};
+};

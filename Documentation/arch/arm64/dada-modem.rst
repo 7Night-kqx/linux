@@ -5,7 +5,7 @@ Xiaomi 15 (dada) modem configuration
 
 ``dada_defconfig`` follows the modem-enabled configuration validated on
 SM8750/dada in November 2026. It forces the built-in
-``qcom/sm8750-xiaomi-dada-modem`` device tree. That board variant enables
+``qcom/sm8750-xiaomi-dada-mainline`` device tree. The default board enables
 MPSS and IPA, allocates guarded RMTFS memory below 4 GiB, and keeps the
 shared WLAN supplies at the device's required minimum voltages.
 
@@ -42,7 +42,7 @@ Build and install
 From the kernel source directory, use an AArch64 cross toolchain::
 
     make O=../build-dada ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dada_defconfig
-    make O=../build-dada ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j8 Image modules qcom/sm8750-xiaomi-dada-modem.dtb
+    make O=../build-dada ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j8 Image modules qcom/sm8750-xiaomi-dada-mainline.dtb
     make O=../build-dada ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_install INSTALL_MOD_PATH=/path/to/new-rootfs
 
 Embedded firmware paths remain relative to the source tree's ``firmware/``.
