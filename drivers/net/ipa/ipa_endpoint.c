@@ -192,6 +192,8 @@ static u32 ipa_status_extract(struct ipa *ipa, const void *data,
 		return le32_get_bits(word[4], GENMASK(31, 16)) |
 			(le32_get_bits(word[5], GENMASK(15, 0)) << 16);
 	case STATUS_TAG_HIGH16:
+		if (version >= IPA_VERSION_5_5)
+			return le32_get_bits(word[5], GENMASK(19, 16));
 		return le32_get_bits(word[5], GENMASK(31, 16));
 	case STATUS_SEQUENCE:
 		return le32_get_bits(word[6], GENMASK(7, 0));
@@ -1488,7 +1490,7 @@ ipa_endpoint_status_tag_valid(struct ipa_endpoint *endpoint, const void *data)
 	u32 endpoint_id;
 
 	status_mask = ipa_status_extract(ipa, data, STATUS_MASK);
-	if (!status_mask)
+	if (!(status_mask & IPA_STATUS_MASK_TAG_VALID))
 		return false;	/* No valid tag */
 
 	/* The status contains a valid tag.  We know the packet was sent to

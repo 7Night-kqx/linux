@@ -34,3 +34,4 @@ ARM64 Architecture
     tagged-pointers
 
     features
+    dada-modem

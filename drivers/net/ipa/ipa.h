@@ -18,6 +18,7 @@
 struct net_device;
 
 struct ipa_interrupt;
+struct ipa_qmi_init_data;
 struct ipa_power;
 struct ipa_smp2p;
 
@@ -69,6 +70,7 @@ struct ipa_smp2p;
  * @modem_state:	State of modem (stopped, running)
  * @modem_netdev:	Network device structure used for modem
  * @qmi:		QMI information
+ * @qmi_init_data:	additional SoC-specific modem initialization parameters
  */
 struct ipa {
 	struct gsi gsi;
@@ -129,6 +131,7 @@ struct ipa {
 	atomic_t modem_state;		/* enum ipa_modem_state */
 	struct net_device *modem_netdev;
 	struct ipa_qmi qmi;
+	const struct ipa_qmi_init_data *qmi_init_data;
 };
 
 /**

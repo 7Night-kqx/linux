@@ -112,6 +112,62 @@ TRACE_EVENT(qrtr_ns_message,
 	)
 );
 
+TRACE_EVENT(qrtr_ns_announce_result,
+	TP_PROTO(unsigned int service, u32 node, u32 port, int rc),
+	TP_ARGS(service, node, port, rc),
+	TP_STRUCT__entry(
+		__field(unsigned int, service)
+		__field(u32, node)
+		__field(u32, port)
+		__field(int, rc)
+	),
+	TP_fast_assign(
+		__entry->service = service;
+		__entry->node = node;
+		__entry->port = port;
+		__entry->rc = rc;
+	),
+	TP_printk("service=%u destination=%u:%u rc=%d",
+		  __entry->service, __entry->node, __entry->port, __entry->rc)
+);
+
+TRACE_EVENT(qrtr_ns_announce_retry,
+	TP_PROTO(u32 node, unsigned int remaining, int rc),
+	TP_ARGS(node, remaining, rc),
+	TP_STRUCT__entry(
+		__field(u32, node)
+		__field(unsigned int, remaining)
+		__field(int, rc)
+	),
+	TP_fast_assign(
+		__entry->node = node;
+		__entry->remaining = remaining;
+		__entry->rc = rc;
+	),
+	TP_printk("node=%u remaining=%u rc=%d",
+		  __entry->node, __entry->remaining, __entry->rc)
+);
+
+TRACE_EVENT(qrtr_tx_hello_gate,
+	TP_PROTO(u32 node, unsigned int type, u32 from_port, u32 to_port),
+	TP_ARGS(node, type, from_port, to_port),
+	TP_STRUCT__entry(
+		__field(u32, node)
+		__field(unsigned int, type)
+		__field(u32, from_port)
+		__field(u32, to_port)
+	),
+	TP_fast_assign(
+		__entry->node = node;
+		__entry->type = type;
+		__entry->from_port = from_port;
+		__entry->to_port = to_port;
+	),
+	TP_printk("node=%u type=%u from_port=%u to_port=%u rc=-11",
+		  __entry->node, __entry->type, __entry->from_port,
+		  __entry->to_port)
+);
+
 #endif /* _TRACE_QRTR_H */
 
 /* This part must be outside protection */

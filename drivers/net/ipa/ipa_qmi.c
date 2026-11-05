@@ -9,6 +9,7 @@
 #include <linux/types.h>
 
 #include "ipa.h"
+#include "ipa_data.h"
 #include "ipa_mem.h"
 #include "ipa_modem.h"
 #include "ipa_qmi_msg.h"
@@ -81,7 +82,7 @@ static void ipa_server_init_complete(struct ipa_qmi *ipa_qmi)
 {
 	struct ipa *ipa = container_of(ipa_qmi, struct ipa, qmi);
 	struct qmi_handle *qmi = &ipa_qmi->server_handle;
-	struct sockaddr_qrtr *sq = &ipa_qmi->modem_sq;
+	struct sockaddr_qrtr *sq = &ipa_qmi->modem_client_sq;
 	struct ipa_init_complete_ind ind = { };
 	int ret;
 
@@ -156,6 +157,8 @@ static void ipa_server_bye(struct qmi_handle *qmi, unsigned int node)
 
 	/* The modem client and server go away at the same time */
 	memset(&ipa_qmi->modem_sq, 0, sizeof(ipa_qmi->modem_sq));
+	memset(&ipa_qmi->modem_client_sq, 0,
+	       sizeof(ipa_qmi->modem_client_sq));
 
 	/* initial_boot doesn't change when modem reboots */
 	/* uc_ready doesn't change when modem reboots */
@@ -192,6 +195,8 @@ static void ipa_server_indication_register(struct qmi_handle *qmi,
 				IPA_QMI_INDICATION_REGISTER_RSP_SZ,
 				ipa_indication_register_rsp_ei, &rsp);
 	if (!ret) {
+		/* Indications belong to this client, not the modem service. */
+		ipa_qmi->modem_client_sq = *sq;
 		ipa_qmi->indication_requested = true;
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
@@ -235,14 +240,14 @@ static const struct qmi_msg_handler ipa_server_msg_handlers[] = {
 		.type		= QMI_REQUEST,
 		.msg_id		= IPA_QMI_INDICATION_REGISTER,
 		.ei		= ipa_indication_register_req_ei,
-		.decoded_size	= IPA_QMI_INDICATION_REGISTER_REQ_SZ,
+		.decoded_size	= sizeof(struct ipa_indication_register_req),
 		.fn		= ipa_server_indication_register,
 	},
 	{
 		.type		= QMI_REQUEST,
 		.msg_id		= IPA_QMI_DRIVER_INIT_COMPLETE,
 		.ei		= ipa_driver_init_complete_req_ei,
-		.decoded_size	= IPA_QMI_DRIVER_INIT_COMPLETE_REQ_SZ,
+		.decoded_size	= sizeof(struct ipa_driver_init_complete_req),
 		.fn		= ipa_server_driver_init_complete,
 	},
 	{ },
@@ -253,7 +258,15 @@ static void ipa_client_init_driver(struct qmi_handle *qmi,
 				   struct sockaddr_qrtr *sq,
 				   struct qmi_txn *txn, const void *decoded)
 {
-	txn->result = 0;	/* IPA_QMI_INIT_DRIVER request was successful */
+	const struct ipa_init_modem_driver_rsp *rsp = decoded;
+	struct ipa_qmi *ipa_qmi;
+	struct ipa *ipa;
+
+	ipa_qmi = container_of(qmi, struct ipa_qmi, client_handle);
+	ipa = container_of(ipa_qmi, struct ipa, qmi);
+	txn->result = rsp->rsp.result == QMI_RESULT_SUCCESS_V01 ? 0 : -EREMOTEIO;
+	dev_info(ipa->dev, "INIT_DRIVER response result=%u error=%u\n",
+		 rsp->rsp.result, rsp->rsp.error);
 	complete(&txn->completion);
 }
 
@@ -263,7 +276,7 @@ static const struct qmi_msg_handler ipa_client_msg_handlers[] = {
 		.type		= QMI_RESPONSE,
 		.msg_id		= IPA_QMI_INIT_DRIVER,
 		.ei		= ipa_init_modem_driver_rsp_ei,
-		.decoded_size	= IPA_QMI_INIT_DRIVER_RSP_SZ,
+		.decoded_size	= sizeof(struct ipa_init_modem_driver_rsp),
 		.fn		= ipa_client_init_driver,
 	},
 	{ },
@@ -380,7 +393,7 @@ init_modem_driver_req(struct ipa_qmi *ipa_qmi)
 			req.hw_stats_quota_base_addr =
 				ipa->mem_offset + mem->offset;
 			req.hw_stats_quota_size_valid = 1;
-			req.hw_stats_quota_size = ipa->mem_offset + mem->size;
+			req.hw_stats_quota_size = mem->size;
 		}
 
 		/* If the DROP stats region is defined, include it */
@@ -390,8 +403,24 @@ init_modem_driver_req(struct ipa_qmi *ipa_qmi)
 			req.hw_stats_drop_base_addr =
 				ipa->mem_offset + mem->offset;
 			req.hw_stats_drop_size_valid = 1;
-			req.hw_stats_drop_size = ipa->mem_offset + mem->size;
+			req.hw_stats_drop_size = mem->size;
 		}
+	}
+
+	if (ipa->qmi_init_data) {
+		const struct ipa_qmi_init_data *data = ipa->qmi_init_data;
+
+		mem = ipa_mem_find(ipa, IPA_MEM_STATS_FILTER_ROUTE);
+		req.hw_filter_stats_info_valid = 1;
+		/* The modem protocol uses the partition offset without BADDR. */
+		req.hw_filter_stats_info.start = mem->offset;
+		req.hw_filter_stats_info.size = data->filter_stats_count * 16;
+		req.hw_filter_stats_info.first_index = data->filter_stats_first;
+		req.hw_filter_stats_info.last_index = data->filter_stats_first +
+						     data->filter_stats_count - 1;
+		req.smem_info_valid = 1;
+		req.smem_info.start = 0;
+		req.smem_info.size = data->smem_size;
 	}
 
 	return &req;

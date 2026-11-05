@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* Include after the existing SM8750/dada platform declarations.
+ * Matching MDT bundles and segments must be supplied by the device owner.
+ */
+&remoteproc_mpss {
+	firmware-name = "qcom/sm8750/modem.mdt", "qcom/sm8750/modem_dtb.mdt";
+	status = "okay";
+};

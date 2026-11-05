@@ -17,7 +17,8 @@ struct ipa;
  * struct ipa_qmi - QMI state associated with an IPA
  * @client_handle:	Used to send an QMI requests to the modem
  * @server_handle:	Used to handle QMI requests from the modem
- * @modem_sq:		QMAP socket address for the modem QMI server
+ * @modem_sq:		Socket address for the modem QMI server
+ * @modem_client_sq:	Socket address for the modem indication client
  * @init_driver_work:	Work structure used for INIT_DRIVER message handling
  * @initial_boot:	True if first boot has not yet completed
  * @uc_ready:		True once DRIVER_INIT_COMPLETE request received
@@ -32,6 +33,9 @@ struct ipa_qmi {
 	/* Information used for the client handle */
 	struct sockaddr_qrtr modem_sq;
 	struct work_struct init_driver_work;
+
+	/* Information used for indications from the server handle */
+	struct sockaddr_qrtr modem_client_sq;
 
 	/* Flags used in negotiating readiness */
 	bool initial_boot;

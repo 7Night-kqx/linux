@@ -25,6 +25,8 @@ static struct {
 	u32 lookup_count;
 	struct workqueue_struct *workqueue;
 	struct work_struct work;
+	struct delayed_work announce_work;
+	bool stopping;
 	void (*saved_data_ready)(struct sock *sk);
 	int local_node;
 } qrtr_ns;
@@ -70,6 +72,7 @@ struct qrtr_node {
 	unsigned int id;
 	struct xarray servers;
 	u32 server_count;
+	unsigned int announce_retries;
 };
 
 /* Max nodes, server, lookup limits are chosen based on the current platform
@@ -79,6 +82,10 @@ struct qrtr_node {
 #define QRTR_NS_MAX_NODES   512
 #define QRTR_NS_MAX_SERVERS 256
 #define QRTR_NS_MAX_LOOKUPS 128
+
+/* Bound retry count; all node state stays on the ordered NS workqueue. */
+#define QRTR_NS_ANNOUNCE_RETRIES 10
+#define QRTR_NS_ANNOUNCE_DELAY_MS 100
 
 static u16 node_count;
 
@@ -132,6 +139,7 @@ static int service_announce_new(struct sockaddr_qrtr *dest,
 	struct qrtr_ctrl_pkt pkt;
 	struct msghdr msg = { };
 	struct kvec iv;
+	int ret;
 
 	trace_qrtr_ns_service_announce_new(srv->service, srv->instance,
 					   srv->node, srv->port);
@@ -149,7 +157,10 @@ static int service_announce_new(struct sockaddr_qrtr *dest,
 	msg.msg_name = (struct sockaddr *)dest;
 	msg.msg_namelen = sizeof(*dest);
 
-	return kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
+	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
+	trace_qrtr_ns_announce_result(srv->service, dest->sq_node,
+				      dest->sq_port, ret);
+	return ret;
 }
 
 static void service_announce_del(struct sockaddr_qrtr *dest,
@@ -231,11 +242,53 @@ static int announce_servers(struct sockaddr_qrtr *sq)
 			if (ret == -ENODEV)
 				continue;
 
-			pr_err("failed to announce new service\n");
+			if (ret != -EAGAIN)
+				pr_err("failed to announce new service: %d\n", ret);
 			return ret;
 		}
 	}
 	return 0;
+}
+
+static void qrtr_ns_queue_announce(void)
+{
+	if (!READ_ONCE(qrtr_ns.stopping))
+		queue_delayed_work(qrtr_ns.workqueue, &qrtr_ns.announce_work,
+				   msecs_to_jiffies(QRTR_NS_ANNOUNCE_DELAY_MS));
+}
+
+static void qrtr_ns_announce_worker(struct work_struct *work)
+{
+	struct sockaddr_qrtr sq = { .sq_family = AF_QIPCRTR,
+				   .sq_port = QRTR_PORT_CTRL };
+	struct qrtr_node *node;
+	unsigned long index;
+	bool pending = false;
+	int ret;
+
+	if (READ_ONCE(qrtr_ns.stopping))
+		return;
+
+	/* Same ordered queue as HELLO, BYE and server add/remove processing. */
+	xa_for_each(&nodes, index, node) {
+		if (!node->announce_retries)
+			continue;
+
+		node->announce_retries--;
+		sq.sq_node = node->id;
+		/* Re-read live servers: never retain a deleted server or skb. */
+		ret = announce_servers(&sq);
+		if (ret != -EAGAIN)
+			node->announce_retries = 0;
+		trace_qrtr_ns_announce_retry(node->id, node->announce_retries,
+					     ret);
+		if (ret == -EAGAIN && !node->announce_retries)
+			pr_warn_ratelimited("qrtr: service announcement to %u exhausted retries\n",
+					    node->id);
+		pending |= node->announce_retries != 0;
+	}
+	if (pending)
+		qrtr_ns_queue_announce();
 }
 
 static struct qrtr_server *server_add(unsigned int service,
@@ -329,7 +382,31 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 
 static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 {
-	return announce_servers(sq);
+	struct qrtr_node *node;
+	int ret;
+
+	ret = announce_servers(sq);
+	if (sq->sq_node == (u32)qrtr_ns.local_node ||
+	    sq->sq_node == QRTR_NODE_BCAST || sq->sq_port != QRTR_PORT_CTRL)
+		return ret;
+
+	node = xa_load(&nodes, sq->sq_node);
+	if (ret != -EAGAIN) {
+		if (node)
+			node->announce_retries = 0;
+		return ret;
+	}
+
+	if (!node)
+		node = node_get(sq->sq_node);
+	if (!node)
+		return -ENOMEM;
+	/* Duplicate HELLOs do not extend an outstanding retry budget. */
+	if (!node->announce_retries)
+		node->announce_retries = QRTR_NS_ANNOUNCE_RETRIES;
+	trace_qrtr_ns_announce_retry(node->id, node->announce_retries, ret);
+	qrtr_ns_queue_announce();
+	return 0;
 }
 
 static int ctrl_cmd_bye(struct sockaddr_qrtr *from)
@@ -711,6 +788,8 @@ int qrtr_ns_init(void)
 
 	INIT_LIST_HEAD(&qrtr_ns.lookups);
 	INIT_WORK(&qrtr_ns.work, qrtr_ns_worker);
+	INIT_DELAYED_WORK(&qrtr_ns.announce_work, qrtr_ns_announce_worker);
+	WRITE_ONCE(qrtr_ns.stopping, false);
 
 	ret = sock_create_kern(&init_net, AF_QIPCRTR, SOCK_DGRAM,
 			       PF_QIPCRTR, &qrtr_ns.sock);
@@ -766,10 +845,13 @@ int qrtr_ns_init(void)
 	return 0;
 
 err_wq:
+	WRITE_ONCE(qrtr_ns.stopping, true);
 	write_lock_bh(&qrtr_ns.sock->sk->sk_callback_lock);
 	qrtr_ns.sock->sk->sk_data_ready = qrtr_ns.saved_data_ready;
 	write_unlock_bh(&qrtr_ns.sock->sk->sk_callback_lock);
 
+	cancel_work_sync(&qrtr_ns.work);
+	cancel_delayed_work_sync(&qrtr_ns.announce_work);
 	destroy_workqueue(qrtr_ns.workqueue);
 err_sock:
 	sock_release(qrtr_ns.sock);
@@ -779,12 +861,14 @@ EXPORT_SYMBOL_GPL(qrtr_ns_init);
 
 void qrtr_ns_remove(void)
 {
+	WRITE_ONCE(qrtr_ns.stopping, true);
 	write_lock_bh(&qrtr_ns.sock->sk->sk_callback_lock);
 	qrtr_ns.sock->sk->sk_data_ready = qrtr_ns.saved_data_ready;
 	write_unlock_bh(&qrtr_ns.sock->sk->sk_callback_lock);
 
-	cancel_work_sync(&qrtr_ns.work);
 	synchronize_net();
+	cancel_work_sync(&qrtr_ns.work);
+	cancel_delayed_work_sync(&qrtr_ns.announce_work);
 	destroy_workqueue(qrtr_ns.workqueue);
 
 	/* sock_release() expects the two references that were put during

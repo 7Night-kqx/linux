@@ -18,6 +18,7 @@
 
 #include <asm/byteorder.h>
 #include <linux/delay.h>
+#include <linux/dada_modem_diag.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/elf.h>
@@ -1079,8 +1080,13 @@ static int rproc_prepare_subdevices(struct rproc *rproc)
 
 unroll_preparation:
 	list_for_each_entry_continue_reverse(subdev, &rproc->subdevs, node) {
-		if (subdev->unprepare)
+		if (subdev->unprepare) {
+			dada_modem_diag_phase(rproc, "subdevice-unprepare-enter", 0,
+					      (unsigned long)subdev->unprepare);
 			subdev->unprepare(subdev);
+			dada_modem_diag_phase(rproc, "subdevice-unprepare-exit", 0,
+					      (unsigned long)subdev->unprepare);
+		}
 	}
 
 	return ret;
@@ -1120,8 +1126,13 @@ static void rproc_stop_subdevices(struct rproc *rproc, bool crashed)
 		return;
 
 	list_for_each_entry_reverse(subdev, &rproc->subdevs, node) {
-		if (subdev->stop)
+		if (subdev->stop) {
+			dada_modem_diag_phase(rproc, "subdevice-stop-enter", 0,
+					      (unsigned long)subdev->stop);
 			subdev->stop(subdev, crashed);
+			dada_modem_diag_phase(rproc, "subdevice-stop-exit", 0,
+					      (unsigned long)subdev->stop);
+		}
 	}
 
 	rproc->subdevs_started = false;
@@ -1132,8 +1143,13 @@ static void rproc_unprepare_subdevices(struct rproc *rproc)
 	struct rproc_subdev *subdev;
 
 	list_for_each_entry_reverse(subdev, &rproc->subdevs, node) {
-		if (subdev->unprepare)
+		if (subdev->unprepare) {
+			dada_modem_diag_phase(rproc, "subdevice-unprepare-enter", 0,
+					      (unsigned long)subdev->unprepare);
 			subdev->unprepare(subdev);
+			dada_modem_diag_phase(rproc, "subdevice-unprepare-exit", 0,
+					      (unsigned long)subdev->unprepare);
+		}
 	}
 }
 
@@ -1714,10 +1730,14 @@ static int rproc_stop(struct rproc *rproc, bool crashed)
 		return -EINVAL;
 
 	/* Stop any subdevices for the remote processor */
+	dada_modem_diag_phase(rproc, "stop-subdevices-enter", 0, crashed);
 	rproc_stop_subdevices(rproc, crashed);
+	dada_modem_diag_phase(rproc, "stop-subdevices-exit", 0, crashed);
 
 	/* the installed resource table is no longer accessible */
+	dada_modem_diag_phase(rproc, "reset-resource-table-enter", 0, 0);
 	ret = rproc_reset_rsc_table_on_stop(rproc);
+	dada_modem_diag_phase(rproc, "reset-resource-table-exit", ret, 0);
 	if (ret) {
 		dev_err(dev, "can't reset resource table: %d\n", ret);
 		return ret;
@@ -1725,7 +1745,9 @@ static int rproc_stop(struct rproc *rproc, bool crashed)
 
 
 	/* power off the remote processor */
+	dada_modem_diag_phase(rproc, "driver-stop-enter", 0, 0);
 	ret = rproc->ops->stop(rproc);
+	dada_modem_diag_phase(rproc, "driver-stop-exit", ret, 0);
 	if (ret) {
 		dev_err(dev, "can't stop rproc: %d\n", ret);
 		return ret;
@@ -1808,22 +1830,30 @@ static int rproc_boot_recovery(struct rproc *rproc)
 	struct device *dev = &rproc->dev;
 	int ret;
 
+	dada_modem_diag_phase(rproc, "recovery-stop-enter", 0, 0);
 	ret = rproc_stop(rproc, true);
+	dada_modem_diag_phase(rproc, "recovery-stop-exit", ret, 0);
 	if (ret)
 		return ret;
 
 	/* generate coredump */
+	dada_modem_diag_phase(rproc, "coredump-enter", 0, rproc->dump_conf);
 	rproc->ops->coredump(rproc);
+	dada_modem_diag_phase(rproc, "coredump-exit", 0, rproc->dump_conf);
 
 	/* load firmware */
+	dada_modem_diag_phase(rproc, "recovery-request-firmware-enter", 0, 0);
 	ret = request_firmware(&firmware_p, rproc->firmware, dev);
+	dada_modem_diag_phase(rproc, "recovery-request-firmware-exit", ret, 0);
 	if (ret < 0) {
 		dev_err(dev, "request_firmware failed: %d\n", ret);
 		return ret;
 	}
 
 	/* boot the remote processor up again */
+	dada_modem_diag_phase(rproc, "recovery-start-enter", 0, 0);
 	ret = rproc_start(rproc, firmware_p);
+	dada_modem_diag_phase(rproc, "recovery-start-exit", ret, 0);
 
 	release_firmware(firmware_p);
 
@@ -1987,6 +2017,53 @@ unlock_mutex:
 	return ret;
 }
 EXPORT_SYMBOL(rproc_boot);
+
+/* Diagnostic stop/dump only. Never requests firmware or starts the remote. */
+int dada_rproc_dump_only(struct rproc *rproc)
+{
+	int ret;
+
+	if (!dada_modem_diag_target(rproc))
+		return -EOPNOTSUPP;
+	ret = mutex_lock_interruptible(&rproc->lock);
+	if (ret)
+		return ret;
+	if (READ_ONCE(rproc->deleting)) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (rproc->state != RPROC_CRASHED || !rproc->recovery_disabled ||
+	    rproc->dump_conf != RPROC_COREDUMP_ENABLED ||
+	    atomic_read(&rproc->power) != 1 || !rproc->ops->coredump ||
+	    rproc_has_feature(rproc, RPROC_FEAT_ATTACH_ON_RECOVERY)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	dada_modem_diag_phase(rproc, "dump-only-stop-enter", 0, 0);
+	ret = rproc_stop(rproc, true);
+	dada_modem_diag_phase(rproc, "dump-only-stop-exit", ret, 0);
+	if (ret)
+		goto out;
+
+	/* rproc_stop left it offline; consume the single validated power vote. */
+	atomic_dec(&rproc->power);
+	dada_modem_diag_phase(rproc, "dump-only-coredump-enter", 0, 0);
+	rproc->ops->coredump(rproc);
+	dada_modem_diag_phase(rproc, "dump-only-coredump-exit", 0, 0);
+
+	/* Same teardown as shutdown, after copying the dump while PAS data exists. */
+	rproc_resource_cleanup(rproc);
+	ret = rproc_unprepare_device(rproc);
+	rproc_disable_iommu(rproc);
+	kfree(rproc->cached_table);
+	rproc->cached_table = NULL;
+	rproc->table_ptr = NULL;
+	dada_modem_diag_phase(rproc, "dump-only-offline", ret, atomic_read(&rproc->power));
+out:
+	mutex_unlock(&rproc->lock);
+	return ret;
+}
 
 static int __rproc_shutdown(struct rproc *rproc, bool force)
 {

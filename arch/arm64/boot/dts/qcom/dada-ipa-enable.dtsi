@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* SM8750/dada stock DT reserves 40 KiB for the GSI firmware.
+ * This is separate from the 54 KiB SMEM IPA filter-table allocation.
+ */
+&ipa_gsi_mem {
+	reg = <0x0 0x9b090000 0x0 0xa000>;
+};
+
+&ipa {
+	firmware-name = "qcom/sm8750/dada/ipa_fws.mdt";
+	status = "okay";
+};

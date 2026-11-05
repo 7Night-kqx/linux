@@ -6,6 +6,7 @@
  */
 
 #include <linux/auxiliary_bus.h>
+#include <linux/dada_modem_diag.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -172,6 +173,10 @@ static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 	rsp->total_domains_valid = true;
 	rsp->total_domains = 0;
 
+	if (IS_ENABLED(CONFIG_QCOM_DADA_MODEM_DIAG))
+		trace_dada_pdm_result(sq->sq_node, sq->sq_port, txn->id,
+				      req->service_name, offset, 0, 0, "", 0,
+				      -EINPROGRESS);
 	mutex_lock(&qcom_pdm_mutex);
 
 	service = qcom_pdm_find(data, req->service_name);
@@ -203,6 +208,20 @@ static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 	ret = qmi_send_response(qmi, sq, txn, SERVREG_GET_DOMAIN_LIST_REQ,
 				SERVREG_GET_DOMAIN_LIST_RESP_MAX_LEN,
 				servreg_get_domain_list_resp_ei, rsp);
+	if (IS_ENABLED(CONFIG_QCOM_DADA_MODEM_DIAG))
+		trace_dada_pdm_result(sq->sq_node, sq->sq_port, txn->id,
+				      req->service_name, offset, rsp->total_domains,
+				      rsp->domain_list_len, "", 0, ret);
+	if (IS_ENABLED(CONFIG_QCOM_DADA_MODEM_DIAG) &&
+	    trace_dada_pdm_result_enabled()) {
+		u32 i;
+
+		for (i = 0; i < rsp->domain_list_len; i++)
+			trace_dada_pdm_result(sq->sq_node, sq->sq_port, txn->id,
+				req->service_name, offset, rsp->total_domains,
+				rsp->domain_list_len, rsp->domain_list[i].name,
+				rsp->domain_list[i].instance, ret);
+	}
 	if (ret)
 		pr_err("Error sending servreg response: %d\n", ret);
 

@@ -8,6 +8,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/dada_modem_diag.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
@@ -33,6 +34,7 @@
 #include "qcom_pil_info.h"
 #include "qcom_q6v5.h"
 #include "remoteproc_internal.h"
+#include "dada_dump_bounds.h"
 
 #define QCOM_PAS_DECRYPT_SHUTDOWN_DELAY_MS	100
 
@@ -130,12 +132,63 @@ struct qcom_pas {
 #endif
 };
 
+/* v3 diagnostics: only a named region inside the declared SMEM reservation. */
+static int dada_pas_copy_smem(struct rproc *rproc,
+			     struct rproc_dump_segment *segment,
+			     void *dest, size_t offset, size_t size)
+{
+	struct device_node *node;
+	struct reserved_mem *rmem;
+	void __iomem *mapping;
+	u64 base = 0, length = 0;
+	int found = 0;
+
+	if (!dada_modem_diag_target(rproc) || !segment->priv ||
+	    strcmp(segment->priv, "md_dbg_buf"))
+		return -ENOENT;
+
+	for_each_compatible_node(node, NULL, "qcom,smem") {
+		if (!of_device_is_available(node))
+			continue;
+		rmem = of_reserved_mem_lookup(node);
+		if (!rmem)
+			continue;
+		base = rmem->base;
+		length = rmem->size;
+		found++;
+	}
+	if (found != 1 ||
+	    !dada_dump_smem_allowed(segment->priv, segment->size, segment->offset,
+				   segment->da, offset, size, base, length))
+		return -ERANGE;
+
+	dada_modem_diag_phase(rproc, "smem-debug-copy-enter", 0, segment->da);
+	/* Match the SMEM driver's WC mapping attributes. */
+	mapping = ioremap_wc(segment->da, segment->size);
+	if (!mapping)
+		return -ENOMEM;
+	memcpy_fromio(dest, mapping + offset, size);
+	iounmap(mapping);
+	dada_modem_diag_phase(rproc, "smem-debug-copy-exit", 0, size);
+	return 0;
+}
+
 static void qcom_pas_segment_dump(struct rproc *rproc,
 				  struct rproc_dump_segment *segment,
 				  void *dest, size_t offset, size_t size)
 {
 	struct qcom_pas *pas = rproc->priv;
 	int total_offset;
+	int ret;
+
+	ret = dada_pas_copy_smem(rproc, segment, dest, offset, size);
+	if (!ret)
+		return;
+	if (ret != -ENOENT) {
+		dada_modem_diag_phase(rproc, "smem-debug-copy-rejected", ret, segment->da);
+		memset(dest, 0xff, size);
+		return;
+	}
 
 	total_offset = segment->da + segment->offset + offset - pas->mem_phys;
 	if (total_offset < 0 || total_offset + size > pas->mem_size) {
@@ -156,11 +209,16 @@ static void qcom_pas_minidump(struct rproc *rproc)
 	if (rproc->dump_conf == RPROC_COREDUMP_DISABLED)
 		return;
 
+	dada_modem_diag_phase(rproc, "dump-map-enter", 0, pas->mem_size);
 	pas->mem_region = qcom_pas_ctx_map(pas->pas_ctx);
+	dada_modem_diag_phase(rproc, "dump-map-exit",
+			      pas->mem_region ? 0 : -ENOMEM, pas->mem_size);
 	if (!pas->mem_region)
 		return;
 
+	dada_modem_diag_phase(rproc, "minidump-enter", 0, pas->minidump_id);
 	qcom_minidump(rproc, pas->minidump_id, qcom_pas_segment_dump);
+	dada_modem_diag_phase(rproc, "minidump-exit", 0, pas->minidump_id);
 	iounmap(pas->mem_region);
 	pas->mem_region = NULL;
 }
@@ -210,7 +268,9 @@ static int qcom_pas_shutdown_poll_decrypt(struct qcom_pas *pas)
 
 	do {
 		msleep(QCOM_PAS_DECRYPT_SHUTDOWN_DELAY_MS);
+		dada_modem_diag_phase(pas->rproc, "decrypt-retry-enter", 0, retry_num);
 		ret = qcom_pas_shutdown(pas->pas_id);
+		dada_modem_diag_phase(pas->rproc, "decrypt-retry-exit", ret, retry_num);
 	} while (ret == -EINVAL && --retry_num);
 
 	return ret;
@@ -339,14 +399,18 @@ static int qcom_pas_start(struct rproc *rproc)
 	if (ret)
 		goto release_pas_metadata;
 
+	dada_modem_diag_phase(rproc, "auth-reset-enter", 0, pas->pas_id);
 	ret = qcom_pas_prepare_and_auth_reset(pas->pas_ctx);
+	dada_modem_diag_phase(rproc, "auth-reset-exit", ret, pas->pas_id);
 	if (ret) {
 		dev_err(pas->dev,
 			"failed to authenticate image and release reset\n");
 		goto unmap_carveout;
 	}
 
+	dada_modem_diag_phase(rproc, "wait-ready-enter", 0, 5000);
 	ret = qcom_q6v5_wait_for_start(&pas->q6v5, msecs_to_jiffies(5000));
+	dada_modem_diag_phase(rproc, "wait-ready-exit", ret, 0);
 	if (ret == -ETIMEDOUT) {
 		dev_err(pas->dev, "start timed out\n");
 		qcom_pas_shutdown(pas->pas_id);
@@ -413,11 +477,15 @@ static int qcom_pas_stop(struct rproc *rproc)
 	int dtb_ret;
 	int ret;
 
+	dada_modem_diag_phase(rproc, "stop-request-enter", 0, 0);
 	ret = qcom_q6v5_request_stop(&pas->q6v5, pas->sysmon);
+	dada_modem_diag_phase(rproc, "stop-request-exit", ret, 0);
 	if (ret == -ETIMEDOUT)
 		dev_err(pas->dev, "timed out on wait\n");
 
+	dada_modem_diag_phase(rproc, "pas-shutdown-enter", 0, pas->pas_id);
 	ret = qcom_pas_shutdown(pas->pas_id);
+	dada_modem_diag_phase(rproc, "pas-shutdown-exit", ret, pas->pas_id);
 	if (ret && pas->decrypt_shutdown)
 		ret = qcom_pas_shutdown_poll_decrypt(pas);
 
@@ -425,7 +493,9 @@ static int qcom_pas_stop(struct rproc *rproc)
 		dev_err(pas->dev, "failed to shutdown: %d\n", ret);
 
 	if (pas->dtb_pas_id) {
+		dada_modem_diag_phase(rproc, "dtb-shutdown-enter", 0, pas->dtb_pas_id);
 		dtb_ret = qcom_pas_shutdown(pas->dtb_pas_id);
+		dada_modem_diag_phase(rproc, "dtb-shutdown-exit", dtb_ret, pas->dtb_pas_id);
 		if (dtb_ret)
 			dev_err(pas->dev, "failed to shutdown dtb: %d\n", dtb_ret);
 
@@ -437,12 +507,17 @@ static int qcom_pas_stop(struct rproc *rproc)
 
 	qcom_pas_unmap_carveout(rproc, pas->mem_phys, pas->mem_size);
 
+	dada_modem_diag_phase(rproc, "q6v5-unprepare-enter", 0, 0);
 	handover = qcom_q6v5_unprepare(&pas->q6v5);
+	dada_modem_diag_phase(rproc, "q6v5-unprepare-exit", handover, 0);
 	if (handover)
 		qcom_pas_handover(&pas->q6v5);
 
-	if (pas->smem_host_id)
+	if (pas->smem_host_id) {
+		dada_modem_diag_phase(rproc, "smem-unlock-enter", 0, pas->smem_host_id);
 		ret = qcom_smem_bust_hwspin_lock_by_host(pas->smem_host_id);
+		dada_modem_diag_phase(rproc, "smem-unlock-exit", ret, pas->smem_host_id);
+	}
 
 	return ret;
 }

@@ -680,6 +680,10 @@ static const struct of_device_id ipa_match[] = {
 		.compatible	= "qcom,sm8550-ipa",
 		.data		= &ipa_data_v5_5,
 	},
+	{
+		.compatible	= "qcom,sm8750-ipa",
+		.data		= &ipa_data_sm8750,
+	},
 	{ },
 };
 MODULE_DEVICE_TABLE(of, ipa_match);
@@ -848,6 +852,7 @@ static int ipa_probe(struct platform_device *pdev)
 	ipa->interrupt = interrupt;
 	ipa->power = power;
 	ipa->version = data->version;
+	ipa->qmi_init_data = data->qmi_init_data;
 	ipa->modem_route_count = data->modem_route_count;
 	init_completion(&ipa->completion);
 

@@ -8,6 +8,7 @@
  */
 
 #include <linux/firmware.h>
+#include <linux/dada_modem_diag.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
@@ -159,14 +160,20 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 	unsigned int num_ss;
 	size_t toc_size;
 
+	dada_modem_diag_phase(rproc, "toc-query-enter", 0, SBL_MINIDUMP_SMEM_ID);
 	/* Get Global minidump ToC*/
 	toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, &toc_size);
+	dada_modem_diag_phase(rproc, "toc-query-exit",
+			      IS_ERR(toc) ? PTR_ERR(toc) : 0,
+			      IS_ERR(toc) ? 0 : toc_size);
 
 	/* check if global table pointer exists and init is set */
 	if (IS_ERR(toc) || !toc->status) {
 		dev_err(&rproc->dev, "Minidump TOC not found in SMEM\n");
 		return;
 	}
+
+	dada_modem_diag_phase(rproc, "toc-status", 0, le32_to_cpu(toc->status));
 
 	/* Derive the number of subsystems from the actual SMEM item size */
 	num_ss = (toc_size - offsetof(struct minidump_global_toc, subsystems)) /
@@ -180,6 +187,12 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 
 	/* Get subsystem table of contents using the minidump id */
 	subsystem = &toc->subsystems[minidump_id];
+	dada_modem_diag_phase(rproc, "toc-subsystem-status", 0, le32_to_cpu(subsystem->status));
+	dada_modem_diag_phase(rproc, "toc-subsystem-enabled", 0, le32_to_cpu(subsystem->enabled));
+	dada_modem_diag_phase(rproc, "toc-subsystem-encryption", 0,
+			      le32_to_cpu(subsystem->encryption_status));
+	dada_modem_diag_phase(rproc, "toc-subsystem-regions", 0,
+			      le32_to_cpu(subsystem->region_count));
 
 	/**
 	 * Collect minidump if SS ToC is valid and segment table
@@ -188,7 +201,10 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 	if (subsystem->regions_baseptr == 0 ||
 	    le32_to_cpu(subsystem->status) != 1 ||
 	    le32_to_cpu(subsystem->enabled) != MINIDUMP_SS_ENABLED) {
-		return rproc_coredump(rproc);
+		dada_modem_diag_phase(rproc, "existing-elf-fallback-enter", 0, 0);
+		rproc_coredump(rproc);
+		dada_modem_diag_phase(rproc, "existing-elf-fallback-exit", 0, 0);
+		return;
 	}
 
 	if (le32_to_cpu(subsystem->encryption_status) != MINIDUMP_SS_ENCR_DONE) {
@@ -207,7 +223,9 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 		dev_err(&rproc->dev, "Failed with error: %d while adding minidump entries\n", ret);
 		goto clean_minidump;
 	}
+	dada_modem_diag_phase(rproc, "minidump-sections-enter", 0, 0);
 	rproc_coredump_using_sections(rproc);
+	dada_modem_diag_phase(rproc, "minidump-sections-exit", 0, 0);
 clean_minidump:
 	qcom_minidump_cleanup(rproc);
 }

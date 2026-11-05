@@ -15,6 +15,16 @@ menuconfig QCOM_SOC
 
 if QCOM_SOC
 
+config QCOM_DADA_MODEM_DIAG
+	bool "Xiaomi dada modem diagnostics"
+	depends on ARCH_QCOM && REMOTEPROC
+	help
+	  Add SM8750 MPSS lifecycle and QRTR/PD mapper tracepoints, plus a
+	  privileged dump-only debugfs command for an already crashed modem.
+	  With tracing support built, tracepoints are inactive until enabled
+	  through tracefs. This option is independent of whether QRTR
+	  transports are built in or modules.
+
 config QCOM_AOSS_QMP
 	tristate "Qualcomm AOSS Driver"
 	depends on MAILBOX

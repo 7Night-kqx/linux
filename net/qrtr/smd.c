@@ -7,6 +7,10 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/rpmsg.h>
+#include <linux/of.h>
+
+#include <linux/dada_modem_diag.h>
+#include "dada_diag_decode.h"
 
 #include "qrtr.h"
 
@@ -14,7 +18,20 @@ struct qrtr_smd_dev {
 	struct qrtr_endpoint ep;
 	struct rpmsg_endpoint *channel;
 	struct device *dev;
+	bool diagnostic_mpss;
 };
+
+static void dada_diag_frame(struct qrtr_smd_dev *qdev, bool tx, int rc,
+			    const void *data, size_t len)
+{
+	struct dada_qrtr_frame frame;
+
+	if (!IS_ENABLED(CONFIG_QCOM_DADA_MODEM_DIAG) ||
+	    !qdev->diagnostic_mpss || !trace_dada_qrtr_frame_enabled())
+		return;
+	dada_diag_decode_frame(data, len, &frame);
+	trace_dada_qrtr_frame(tx, rc, &frame);
+}
 
 /* from smd to qrtr */
 static int qcom_smd_qrtr_callback(struct rpmsg_device *rpdev,
@@ -27,6 +44,7 @@ static int qcom_smd_qrtr_callback(struct rpmsg_device *rpdev,
 		return -EAGAIN;
 
 	rc = qrtr_endpoint_post(&qdev->ep, data, len);
+	dada_diag_frame(qdev, false, rc, data, len);
 	if (rc == -EINVAL) {
 		dev_err(qdev->dev, "invalid ipcrouter packet\n");
 		/* return 0 to let smd drop the packet */
@@ -47,6 +65,7 @@ static int qcom_smd_qrtr_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 		goto out;
 
 	rc = rpmsg_send(qdev->channel, skb->data, skb->len);
+	dada_diag_frame(qdev, true, rc, skb->data, skb->len);
 
 out:
 	if (rc)
@@ -59,6 +78,7 @@ out:
 static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 {
 	struct qrtr_smd_dev *qdev;
+	const char *label;
 	int rc;
 
 	qdev = devm_kzalloc(&rpdev->dev, sizeof(*qdev), GFP_KERNEL);
@@ -68,6 +88,9 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 	qdev->channel = rpdev->ept;
 	qdev->dev = &rpdev->dev;
 	qdev->ep.xmit = qcom_smd_qrtr_send;
+	qdev->diagnostic_mpss =
+		!of_property_read_string(dev_of_node(rpdev->dev.parent),
+					 "label", &label) && !strcmp(label, "mpss");
 
 	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
 	if (rc)

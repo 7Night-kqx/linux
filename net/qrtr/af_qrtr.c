@@ -15,6 +15,8 @@
 
 #include "qrtr.h"
 
+#include <trace/events/qrtr.h>
+
 #define QRTR_PROTO_VER_1 1
 #define QRTR_PROTO_VER_2 3
 
@@ -351,6 +353,8 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 
 	mutex_lock(&node->ep_lock);
 	if (!node->hello_sent && type != QRTR_TYPE_HELLO) {
+		trace_qrtr_tx_hello_gate(READ_ONCE(node->nid), type,
+					 from->sq_port, to->sq_port);
 		mutex_unlock(&node->ep_lock);
 		kfree_skb(skb);
 		return -EAGAIN;

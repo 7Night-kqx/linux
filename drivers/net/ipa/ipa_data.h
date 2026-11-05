@@ -220,6 +220,18 @@ struct ipa_power_data {
 };
 
 /**
+ * struct ipa_qmi_init_data - additional modem initialization parameters
+ * @filter_stats_first: first modem filter/route statistics index
+ * @filter_stats_count: number of modem filter/route statistics entries
+ * @smem_size: requested SMEM filter table size, before page alignment
+ */
+struct ipa_qmi_init_data {
+	u8 filter_stats_first;
+	u8 filter_stats_count;
+	u32 smem_size;
+};
+
+/**
  * struct ipa_data - combined IPA/GSI configuration data
  * @version:		IPA hardware version
  * @backward_compat:	BCR register value (prior to IPA v4.5 only)
@@ -231,6 +243,7 @@ struct ipa_power_data {
  * @resource_data:	IPA resource configuration data
  * @mem_data:		IPA memory region data
  * @power_data:		IPA power data
+ * @qmi_init_data:	optional extra modem initialization parameters
  */
 struct ipa_data {
 	enum ipa_version version;
@@ -243,6 +256,7 @@ struct ipa_data {
 	const struct ipa_resource_data *resource_data;
 	const struct ipa_mem_data *mem_data;
 	const struct ipa_power_data *power_data;
+	const struct ipa_qmi_init_data *qmi_init_data;
 };
 
 extern const struct ipa_data ipa_data_v3_1;
@@ -255,5 +269,6 @@ extern const struct ipa_data ipa_data_v4_11;
 extern const struct ipa_data ipa_data_v5_0;
 extern const struct ipa_data ipa_data_v5_2;
 extern const struct ipa_data ipa_data_v5_5;
+extern const struct ipa_data ipa_data_sm8750;
 
 #endif /* _IPA_DATA_H_ */

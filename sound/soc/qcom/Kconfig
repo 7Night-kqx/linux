@@ -252,4 +252,18 @@ config SND_SOC_X1E80100
 	  X1E80100 SoC-based systems.
 	  Say Y or M if you want to use audio device on this SoCs.
 
+config SND_SOC_DADA_VOICE_CONTROLS
+	tristate "Xiaomi dada AudioReach call controls"
+	depends on ARM64 && OF && m
+	depends on QCOM_APR && SND_SOC_QDSP6_APM && SND_SOC_LPASS_TX_MACRO
+	select CRYPTO_LIB_SHA256
+	help
+	  Build the dada_audioreach, dada_voice_backend and dada_call_mute
+	  add-on modules used by the Xiaomi 15 voice audio service. Load them
+	  after the ADSP and sound card are ready. They expose a privileged
+	  graph/calibration transport, borrow prepared hostless backends and
+	  add the TX DEC0 microphone mute control. The transport requires the
+	  validated Xiaomi-dada topology. These are module-only because their
+	  initialization relies on devices created after DSP firmware boot.
+
 endif #SND_SOC_QCOM

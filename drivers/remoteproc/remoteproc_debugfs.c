@@ -18,11 +18,41 @@
 
 #include <linux/kernel.h>
 #include <linux/debugfs.h>
+#include <linux/capability.h>
+#include <linux/dada_modem_diag.h>
 #include <linux/remoteproc.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
 
 #include "remoteproc_internal.h"
+
+/* Exact command, privileged writer, lifetime protected by debugfs file proxy. */
+static ssize_t dada_dump_only_write(struct file *filp, const char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	char command[10] = {};
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (*ppos || (count != 7 && count != 8))
+		return -EINVAL;
+	if (copy_from_user(command, buf, count))
+		return -EFAULT;
+	if (memcmp(command, "collect", 7) || (count == 8 && command[7] != '\n'))
+		return -EINVAL;
+	ret = dada_rproc_dump_only(filp->private_data);
+	if (ret)
+		return ret;
+	*ppos += count;
+	return count;
+}
+
+static const struct file_operations dada_dump_only_fops = {
+	.write = dada_dump_only_write,
+	.open = simple_open,
+	.llseek = NULL,
+};
 
 /* remoteproc debugfs parent dir */
 static struct dentry *rproc_dbg;
@@ -414,6 +444,9 @@ void rproc_create_debug_dir(struct rproc *rproc)
 			    rproc, &rproc_rsc_table_fops);
 	debugfs_create_file("carveout_memories", 0400, rproc->dbg_dir,
 			    rproc, &rproc_carveouts_fops);
+	if (IS_ENABLED(CONFIG_QCOM_DADA_MODEM_DIAG) && dada_modem_diag_target(rproc))
+		debugfs_create_file("dump_only", 0200, rproc->dbg_dir,
+				    rproc, &dada_dump_only_fops);
 	debugfs_create_file("coredump", 0600, rproc->dbg_dir,
 			    rproc, &rproc_coredump_fops);
 }
