@@ -85,6 +85,12 @@ enum qca_flags {
 	 * (IBS byte ack 0xFC still works via its ROM sniffer).
 	 */
 	QCA_IBS_NO_SLEEP,
+	/* Peach: a peripheral-side baudrate programming frame is in flight.
+	 * The controller answers it with a bare status byte that belongs to
+	 * neither H4 nor the IBS protocol, so the reassembly error it causes
+	 * is expected and must not be reported.
+	 */
+	QCA_SETTING_PERI_BAUDRATE,
 };
 
 enum qca_capabilities {
@@ -870,6 +876,16 @@ static void device_woke_up(struct hci_uart *hu)
 		return;
 	}
 
+	/*
+	 * Peach: setup wakes the controller with a hand written WAKE_IND while
+	 * the sleep protocol is disabled, so the acknowledgement arrives
+	 * without the state machine having asked for it.
+	 */
+	if (test_bit(QCA_IBS_DISABLED, &qca->flags)) {
+		spin_unlock_irqrestore(&qca->hci_ibs_lock, flags);
+		return;
+	}
+
 	switch (qca->tx_ibs_state) {
 	case HCI_IBS_TX_AWAKE:
 		/* Expect one if we send 2 WAKEs */
@@ -1301,7 +1317,16 @@ static int qca_recv(struct hci_uart *hu, const void *data, int count)
 				  qca_recv_pkts, ARRAY_SIZE(qca_recv_pkts));
 	if (IS_ERR(qca->rx_skb)) {
 		int err = PTR_ERR(qca->rx_skb);
-		bt_dev_err(hu->hdev, "Frame reassembly failed (%d)", err);
+
+		/*
+		 * Peach: the peripheral-side baudrate frame is answered with a
+		 * stray status byte that is not a valid H4 type. It is expected
+		 * for exactly this exchange, so do not spam the log with it.
+		 */
+		if (err != -EILSEQ ||
+		    !test_bit(QCA_SETTING_PERI_BAUDRATE, &qca->flags))
+			bt_dev_err(hu->hdev, "Frame reassembly failed (%d)", err);
+
 		qca->rx_skb = NULL;
 		return err;
 	}
@@ -1412,6 +1437,73 @@ static inline void host_set_baudrate(struct hci_uart *hu, unsigned int speed)
 		serdev_device_set_baudrate(hu->serdev, speed);
 	else
 		hci_uart_set_baudrate(hu, speed);
+}
+
+/*
+ * Peach (WCN7850/WCN7860 "ganges"): program the controller side of the UART
+ * before the host switches.  Without this the SetBaudRateReq (0xfc48) issued
+ * by qca_set_speed() is accepted by the ROM but the peripheral never follows,
+ * which is what forced the old "stay at 115200 and pace every segment" path
+ * (a ~25 s firmware download).  With the peripheral pre-programmed the normal
+ * 0xfc48 flow works and the rampatch runs at max-speed.
+ *
+ * 0x31 is the vendor "peripheral configuration" byte, 0xf1ff its opcode and
+ * 0x0202 the UART sub-block; the trailing byte is the qca_baudrate value.
+ */
+static int peri_set_baudrate(struct hci_uart *hu, unsigned int speed)
+{
+	struct qca_data *qca = hu->priv;
+	struct sk_buff *skb;
+	u8 cmd[] = { 0x31, 0x00, 0xf1, 0xff, 0x02, 0x02, 0x00 };
+
+	if (!hu->serdev)
+		return -ENODEV;
+
+	/*
+	 * qca_get_baudrate_value() silently maps unknown rates to 115200, which
+	 * would leave the controller on a different rate than the host after
+	 * the switch.  Refuse anything the protocol cannot express.
+	 */
+	if (qca_get_baudrate_value(speed) == QCA_BAUDRATE_115200 &&
+	    speed != 115200) {
+		bt_dev_err(hu->hdev, "Unsupported UART rate %u", speed);
+		return -EINVAL;
+	}
+
+	cmd[6] = qca_get_baudrate_value(speed);
+
+	/*
+	 * The controller answers with a bare status byte that is part of
+	 * neither H4 nor the sleep protocol and that the driver has no use
+	 * for.  Flag it as on its way so the receiver drops it instead of
+	 * reporting an invalid packet type.
+	 */
+	set_bit(QCA_SETTING_PERI_BAUDRATE, &qca->flags);
+
+	if (send_hci_ibs_cmd(HCI_IBS_WAKE_IND, hu) < 0) {
+		clear_bit(QCA_SETTING_PERI_BAUDRATE, &qca->flags);
+		return -EIO;
+	}
+
+	msleep(10);
+
+	skb = bt_skb_alloc(sizeof(cmd), GFP_KERNEL);
+	if (!skb) {
+		clear_bit(QCA_SETTING_PERI_BAUDRATE, &qca->flags);
+		return -ENOMEM;
+	}
+
+	/* Raw frame: queued on txq directly, so no H4 type byte is prepended. */
+	skb_put_data(skb, cmd, sizeof(cmd));
+	skb_queue_tail(&qca->txq, skb);
+	hci_uart_tx_wakeup(hu);
+
+	serdev_device_wait_until_sent(hu->serdev, CMD_TRANS_TIMEOUT);
+	msleep(100);
+
+	clear_bit(QCA_SETTING_PERI_BAUDRATE, &qca->flags);
+
+	return 0;
 }
 
 static int qca_send_power_pulse(struct hci_uart *hu, bool on)
@@ -1921,8 +2013,15 @@ static int qca_configure_hfp_offload(struct hci_dev *hdev)
 	return 0;
 }
 
-static bool qca_peach_uses_current_baudrate(enum qca_btsoc_type soc_type,
-					    const struct qca_btsoc_version *ver)
+/*
+ * Peach (ganges/WCN7880 on dada, WCN7860 on piano): these product/ROM tuples
+ * need the peripheral-side UART rate programmed explicitly before the host
+ * switches, otherwise SetBaudRateReq (0xfc48) leaves the controller silent
+ * and the firmware has to be downloaded at 115200 with per-segment pacing
+ * (a ~25 s bring-up).
+ */
+static bool qca_is_peach(enum qca_btsoc_type soc_type,
+			 const struct qca_btsoc_version *ver)
 {
 	u32 product_id, soc_id;
 	u16 rom_ver;
@@ -1934,14 +2033,6 @@ static bool qca_peach_uses_current_baudrate(enum qca_btsoc_type soc_type,
 	soc_id = le32_to_cpu(ver->soc_id);
 	rom_ver = le16_to_cpu(ver->rom_ver);
 
-	/*
-	 * The Qualcomm Peach HAL deliberately skips SetBaudRateReq (0xfc48)
-	 * for these product/ROM tuples and starts the TLV download at the UART
-	 * rate which was used successfully for the version request. Sending
-	 * 0xfc48 here instead leaves the controller silent; on dada
-	 * (ganges/WCN7880) it produces -84 reassembly errors and alternating
-	 * version read failures across retries.
-	 */
 	return ((soc_id == 0x40210100 && rom_ver == 0x0100) ||
 		(soc_id == 0x40210200 && rom_ver == 0x0200)) &&
 	       (product_id == 0x1e || product_id == 0x21);
@@ -1960,6 +2051,7 @@ static int qca_setup(struct hci_uart *hu)
 	struct qca_btsoc_version ver;
 	struct qca_serdev *qcadev = NULL;
 	const char *soc_name;
+	bool peach, peach_legacy = false;
 
 	if (hu->serdev)
 		qcadev = serdev_device_get_drvdata(hu->serdev);
@@ -2039,20 +2131,37 @@ retry:
 		qca_set_speed(hu, QCA_INIT_SPEED);
 	}
 
+	/*
+	 * Peach tuples: program the controller side of the UART before switching
+	 * the host, otherwise the peripheral ignores SetBaudRateReq (0xfc48) and
+	 * the whole firmware download has to run at 115200 with per-segment
+	 * pacing (a ~25 s bring-up).  If the controller rejects the peripheral
+	 * frame, fall back to that legacy path on the next setup attempt instead
+	 * of leaving BT dead.
+	 */
+	peach = qca_is_peach(soc_type, &ver);
+
 	/* Setup user speed if needed */
 	speed = qca_get_speed(hu, QCA_OPER_SPEED);
-	if (speed && !qca_peach_uses_current_baudrate(soc_type, &ver)) {
+
+	if (speed && peach && !peach_legacy) {
+		ret = peri_set_baudrate(hu, speed);
+		if (ret) {
+			bt_dev_warn(hdev,
+				    "Peripheral baudrate setup failed (%d), retrying at 115200",
+				    ret);
+			peach_legacy = true;
+			goto out;
+		}
+	}
+
+	if (speed && !(peach && peach_legacy)) {
 		ret = qca_set_speed(hu, QCA_OPER_SPEED);
 		if (ret)
 			goto out;
 
 		qca_baudrate = qca_get_baudrate_value(speed);
 	}
-	/*
-	 * Peach tuple: skip 0xfc48 entirely. The transport stays at the
-	 * version-request rate (115200) and qca_baudrate stays
-	 * QCA_BAUDRATE_115200, so the NVM HCI baud tag matches the live rate.
-	 */
 
 	switch (soc_type) {
 	case QCA_WCN3950:
@@ -2077,7 +2186,7 @@ retry:
 			firmware_name, rampatch_name);
 	if (!ret) {
 		clear_bit(QCA_IBS_DISABLED, &qca->flags);
-		if (qca_peach_uses_current_baudrate(soc_type, &ver))
+		if (peach)
 			set_bit(QCA_IBS_NO_SLEEP, &qca->flags);
 		qca_debugfs_init(hdev);
 		hu->hdev->hw_error = qca_hw_error;

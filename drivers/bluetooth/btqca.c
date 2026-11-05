@@ -422,12 +422,11 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 
 				/* HCI transport layer parameters
 				 * enabling software inband sleep
-				 * onto controller side.  Peach (tuple
-				 * gated) must not enable it: the
-				 * controller then stops responding
-				 * after ~2s of UART idle.
+				 * onto controller side.  Peach must not
+				 * enable it: the controller then stops
+				 * responding after ~2s of UART idle.
 				 */
-				if (!config->current_baud_download)
+				if (!config->peach)
 					tlv_nvm->data[0] |= 0x80;
 
 				/* UART Baud Rate */
@@ -446,7 +445,7 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 				 * answering ~1s after last traffic and
 				 * never recovers without firmware reload.
 				 */
-				if (config->current_baud_download) {
+				if (config->peach) {
 					if (tag_len < 2)
 						return -EINVAL;
 					tlv_nvm->data[0] &= ~0x01;
@@ -499,11 +498,13 @@ static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 		err = __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
 				     cmd);
 		/*
-		 * The Peach tuple exemption keeps the live transport at 115200.
-		 * Pace unacknowledged packets so the final synchronous command
-		 * is not queued behind the entire rampatch while its fixed HCI
-		 * command timer is already running (243-byte segment on
-		 * 115200 8N1 is ~21ms of wire time).
+		 * Legacy Peach fallback only: the transport was left at 115200
+		 * because the controller refused the baudrate switch.  Pace
+		 * unacknowledged packets so the final synchronous command is not
+		 * queued behind the entire rampatch while its fixed HCI command
+		 * timer is already running (243-byte segment on 115200 8N1 is
+		 * ~21 ms of wire time).  At the negotiated rate the UART is fast
+		 * enough that pacing would only re-introduce the 25 s bring-up.
 		 */
 		if (!err && current_baud_download)
 			usleep_range(24000, 25000);
@@ -800,21 +801,30 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	config.user_baud_rate = baudrate;
 
 	/*
-	 * Qualcomm Peach HAL tuples: the controller rejects SetBaudRateReq
-	 * (0xfc48) during firmware download, so the transport must stay at
-	 * the rate used for the version request (115200) and the segments
-	 * are paced in qca_tlv_send_segment().
+	 * Peach (ganges) needs its NVM sleep-enable tags suppressed no matter
+	 * which UART rate the download runs at, otherwise the controller stops
+	 * answering shortly after the first idle transition.
 	 */
 	{
 		u32 product_id = le32_to_cpu(ver.product_id);
 		u32 soc_id = le32_to_cpu(ver.soc_id);
 		u16 tuple_rom = le16_to_cpu(ver.rom_ver);
 
-		config.current_baud_download =
+		config.peach =
 			((soc_id == 0x40210100 && tuple_rom == 0x0100) ||
 			 (soc_id == 0x40210200 && tuple_rom == 0x0200)) &&
 			(product_id == 0x1e || product_id == 0x21);
 	}
+
+	/*
+	 * Legacy Peach fallback: the controller refused the baudrate switch, so
+	 * the transport is still at the version-request rate and every segment
+	 * has to be paced in qca_tlv_send_segment().  When the peripheral-side
+	 * pre-programming worked, @baudrate is the negotiated rate and no pacing
+	 * is needed.
+	 */
+	config.current_baud_download = config.peach &&
+				       (baudrate == QCA_BAUDRATE_115200);
 
 	/* Firmware files to download are based on ROM version.
 	 * ROM version is derived from last two bytes of soc_ver.
