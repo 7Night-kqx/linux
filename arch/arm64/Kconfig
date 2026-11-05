@@ -2512,6 +2512,11 @@ config ARM64_BUILTIN_DTB_FORCE
 	  regions. The bootloader initrd pointers are discarded, so use
 	  CONFIG_INITRAMFS_SOURCE for the root filesystem.
 
+	  EFI boot is an exception: a valid EFI stub FDT is retained so
+	  that its system table, final memory map, command line and initrd
+	  survive the handoff. Supply the selected board DTB to the EFI
+	  loader (for example, with GRUB's devicetree command).
+
 	  If unsure, say N.
 
 config ARM64_BOOT_BEACON

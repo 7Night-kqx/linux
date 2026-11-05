@@ -212,6 +212,32 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 	bool builtin = dt_virt != NULL;
 	const char *name;
 
+	if (builtin && IS_ENABLED(CONFIG_EFI) && dt_phys) {
+		int boot_size, chosen, len;
+		void *boot_fdt;
+
+		/*
+		 * The EFI stub passes the final memory map, system table,
+		 * command line and initrd in its FDT. Discarding that tree
+		 * also loses EFI_BOOT and makes a valid EFI entry look like
+		 * an invalid non-EFI boot with the MMU enabled. Only force
+		 * the embedded board tree on the non-EFI boot path.
+		 */
+		boot_fdt = fixmap_remap_fdt(dt_phys, &boot_size, PAGE_KERNEL);
+		if (boot_fdt) {
+			chosen = fdt_path_offset(boot_fdt, "/chosen");
+			if (chosen >= 0 &&
+			    fdt_getprop(boot_fdt, chosen,
+					"linux,uefi-system-table", &len) &&
+			    len == sizeof(fdt64_t)) {
+				dt_virt = boot_fdt;
+				size = boot_size;
+				builtin = false;
+				pr_notice("Using EFI stub DTB, preserving UEFI handoff\n");
+			}
+		}
+	}
+
 	if (builtin) {
 		/*
 		 * The blob lives inside the kernel image, so it is mapped and
