@@ -18,9 +18,11 @@
  * copying a file and wiring two more places. The rounds differed almost entirely
  * in /chosen bootargs; only ~10 of the 66 added real DT nodes.
  *
- * ROUND IDENTITY now lives in the `dada_probe=` cmdline token alone, not in the
- * filename. The current bootargs are the round-cb (SMP) set, with the probe tag
- * renamed builtin-dtb-cb -> builtin-dtb-mainline.
+ * That probe chain has since been collapsed: the 43 chained /chosen bootargs
+ * overrides are now a SINGLE clean bootargs in the top-level /chosen (usbhost
+ * track, tty0 console, initramfs-era tokens removed). All non-bootargs nodes
+ * from every round are retained; the DTB was verified node-identical to the
+ * pre-collapse build apart from the bootargs and model string.
  *
  * HISTORY (oldest first): base board/PMIC/UFS/USB -> display bring-up probes
  * (m..aw: DPU/DSI enable, DSC, link config, readback, backlight, vendor table)
@@ -77,7 +79,13 @@
 	};
 
 	chosen {
-		stdout-path = "serial0:115200n8";
+		/* Single bootargs for the merged board DTS. usbhost track: tty0 is
+		 * the only console and must be the last console= so /dev/console
+		 * carries systemd status. All bring-up-round overrides (43 chained
+		 * /chosen blocks) were collapsed into this one; initramfs-era
+		 * tokens (rdinit, dada-stay, dada-pivot, panel params, maxcpus)
+		 * are gone. */
+		bootargs = "console=tty0 nokaslr clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35";
 	};
 
 	vph_pwr: vph-pwr-regulator {
@@ -797,8 +805,6 @@
 };
 
 / {
-	model = "Xiaomi 15 (dada) mainline bring-up probe";
-
 	/*
 	 * Verbatim from the ABL-populated /memory reg of the runtime device
 	 * tree, sorted, with the single zero-length bank at 0xd8600000
@@ -824,39 +830,6 @@
 		      <0x0a 0x00000000 0x02 0x00000000>;
 	};
 
-	chosen {
-		/*
-		 * console=tty0 is intentional. The board has no accessible
-		 * UART, and /chosen stdout-path would otherwise make the geni
-		 * driver take over as the console; a console write that stalls
-		 * on a port nobody is listening to would destroy the only
-		 * evidence channel this probe has. Setting any console= on the
-		 * command line makes of_console_check() ignore stdout-path,
-		 * which is also what the stock kernel does.
-		 *
-		 * The pstore console does not need to be named here: it forces
-		 * CON_ENABLED | CON_PRINTBUFFER | CON_ANYTIME at registration,
-		 * so it is enabled anyway and replays the whole log buffer.
-		 *
-		 * clk/pd/regulator_ignore_unused keeps the late_initcall sync
-		 * from switching off resources that firmware still owns.
-		 *
-		 * maxcpus=1 keeps secondary CPU bring-up out of the picture for
-		 * the first probe.
-		 *
-		 * printk.devkmsg=on is required, not cosmetic. The default is
-		 * ratelimit = 10 messages per 5 s per open fd, and round K lost
-		 * exactly 6 of dada-init's lines to it (see
-		 * evidence/probe-run-k-2026-09-06.md section 5.6).
-		 *
-		 * dada_probe= is only a self-identifying tag. Note it comes from
-		 * HERE and not from the boot image header for this variant: the
-		 * bootloader FDT is discarded, so /chosen in this blob is the
-		 * only cmdline the kernel sees. Round K shipped with the stale
-		 * "builtin-dtb-c" tag for that reason.
-		 */
-		bootargs = "console=tty0 ignore_loglevel nokaslr clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
 };
 
 &{/reserved-memory} {
@@ -939,27 +912,6 @@
 	cont_splash_mem: cont-splash@fc800000 {
 		reg = <0x00 0xfc800000 0x00 0x2b00000>;
 		no-map;
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc enabled";
-
-	chosen {
-		/*
-		 * Byte-for-byte round L's command line with the tag changed. If
-		 * this boot behaves differently from round L, CONFIG_QCOM_PDC=y
-		 * has to be the only reason it can.
-		 */
-		bootargs = "console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm reserved";
-
-	chosen {
-		bootargs = "console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
 	};
 };
 
@@ -1076,19 +1028,6 @@
 	};
 };
 
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm reserved + rpmh unblocked";
-
-	chosen {
-		/*
-		 * Byte-for-byte the round P command line with the tag changed.
-		 * If this boot behaves differently from round P, the deleted
-		 * power-domains property has to be the only reason it can.
-		 */
-		bootargs = "console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
 &apps_rsc {
 	/*
 	 * The one line this file adds on top of round P. Round M's proven
@@ -1103,100 +1042,9 @@
 	/delete-property/ power-domains;
 };
 
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + g_serial";
-
-	chosen {
-		/*
-		 * The Q command line plus console=ttyGS0,115200. ttynull
-		 * stays as the early console (g_serial is not up until
-		 * initcall time); once g_serial binds, the console switches.
-		 * This is the standard two-stage console pattern for USB
-		 * gadget consoles.
-		 */
-		bootargs = "console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial";
-
-	chosen {
-		/*
-		 * Byte-for-byte the round R command line with the tag changed.
-		 * If this boot behaves differently from round R, the enabled
-		 * QMP phy has to be the only reason it can.
-		 */
-		bootargs = "console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
 &usb_dp_qmpphy {
 	/* The single variable. See the header comment. */
 	status = "okay";
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + ttyGS0 console";
-
-	chosen {
-		/*
-		 * The S command line plus console=ttyGS0,115200. ttynull
-		 * stays first (early console); ttyGS0 last (preferred).
-		 * Everything else is byte-for-byte round S.
-		 */
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + interactive shell";
-
-	chosen {
-		/*
-		 * Byte-for-byte the round T command line with the tag changed.
-		 * The shell lives in the initramfs; the kernel and this DT
-		 * are otherwise round T's.
-		 */
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + interactive shell + spmi-pmic mfd";
-
-	chosen {
-		/*
-		 * Byte-for-byte the round T command line with the tag changed.
-		 * The shell lives in the initramfs; the kernel and this DT
-		 * are otherwise round T's.
-		 */
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + shell + spmi-pmic + pmic children";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + shell + pmic children + observation";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + shell + pmic children + iommu";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
 };
 
 &tlmm {
@@ -1320,52 +1168,6 @@
 };
 
 / {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, pdc + tlmm + rpmh + qmpphy + g_serial + shell + pmic children + iommu + drm-msm nt37801";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + dpu-fini-guard";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + log-tail";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-
 	display_panel_vddd: regulator-display-panel-vddd {
 		compatible = "regulator-fixed";
 		regulator-name = "display_panel_vddd";
@@ -1417,54 +1219,6 @@
 	};
 };
 
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + readback";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + 1 read";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + read sweep";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
 /* The round-AK variable: keep the ABL splash translations alive across
  * the kernel's SMMU takeover so the handoff cannot fault-terminate a
  * stalled MDSS fetch and wedge the bus. Identity mapping: the iova
@@ -1499,160 +1253,6 @@
 
 &mdss {
 	memory-region = <&cont_splash_ak>;
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + bpp revert";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay g_multi.removable=1 panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + pre-arm cmd engine reset";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + pre-arm cmd engine reset + no embedded rootfs";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + no embedded rootfs + dsi_host restored to BL";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + no embedded rootfs + dsi_host restored to BL + pivot to rescue rootfs";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay dada_pivot panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + no embedded rootfs + dsi_host restored to BL + pivot to rescue rootfs + tsens";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay dada_pivot panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + no embedded rootfs + dsi_host restored to BL + pivot to rescue rootfs + tsens + splash-handover robust (iommu gap + clean dsi reset)";
-
-	chosen {
-		bootargs = "console=ttyGS0,115200 console=tty0 console=tty0 ignore_loglevel nokaslr maxcpus=1 clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=5 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay dada_pivot panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-	};
-};
-
-/ {
-	model = "Xiaomi 15 (dada) mainline bring-up probe, display + smem + fini-guard + smmu + o3 panel + bl readback + dsc link cfg + splash handover + vendor dsc table + vendor dsc rc config + raw blob pps bit4 + n422 clear + vendor initial lines + stay + content + dsc bpp 128/128 + vt quiesce + paced log + no test pattern + u_serial console fix + splash rename + sm8750 mdss identity + ufs read + ro mount + sb magic + usb net + backlight adjust + ms lun removable + loopback rootfs + splash direct-map + no embedded rootfs + dsi_host restored to BL + pivot to rescue rootfs + tsens + splash-handover robust + SMP all 8 cores";
-
-	chosen {
-		/* Single variable vs CA: maxcpus=1 removed. */
-		bootargs = "console=ttyGS0,115200 console=tty0 nokaslr clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=4 printk.devkmsg=on rdinit=/dada-init dada_probe=builtin-dtb-nfc1 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes ath12k.mac_addr=CE:76:4A:AB:26:35 root=/dev/sda36 rw rootwait loglevel=4 systemd.show_status=yes dada_stay dada_pivot panel_xiaomi_dada_o3.pps_bpp=128 panel_xiaomi_dada_o3.enc_bpp=128 panel_xiaomi_dada_o3.dsc_native_422=1 panel_xiaomi_dada_o3.dsc_cvt_rgb=0";
-
-	};
 };
 
 /*
