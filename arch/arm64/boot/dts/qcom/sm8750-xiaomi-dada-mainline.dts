@@ -659,7 +659,12 @@
 };
 
 &usb {
-	dr_mode = "peripheral";
+	/* USB-C host track: USB_DWC3_HOST=y plus xHCI/STORAGE/UAS/HID built in.
+	 * "peripheral" here would leave the single DWC3 controller in gadget
+	 * mode and no USB peripheral (U disk, keyboard, hub) can be attached.
+	 * There is no independent XHCI node in sm8750.dtsi; dwc3/host.c creates
+	 * the "xhci-hcd" platform device that xhci-plat binds to. */
+	dr_mode = "host";
 	/delete-property/ usb-role-switch;
 	status = "okay";
 };
