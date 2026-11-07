@@ -104,6 +104,15 @@ properties:
     maximum: 20475
     multipleOf: 5
 
+  qcom,brake-pattern:
+    $ref: /schemas/types.yaml#/definitions/uint8-array
+    description:
+      Closed-loop brake amplitude samples, ordered from the first to the last
+      braking cycle. Unspecified trailing samples are zero. If absent, the
+      brake amplitude samples are all zero.
+    minItems: 1
+    maxItems: 8
+
 required:
   - compatible
   - reg

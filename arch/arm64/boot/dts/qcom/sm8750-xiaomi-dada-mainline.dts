@@ -167,6 +167,14 @@
 	};
 };
 
+&pmih0108_haptics {
+	/* Stock direct-play voltage and 170 Hz LRA period, rounded to 5 us. */
+	qcom,vmax-microvolt = <2050000>;
+	qcom,lra-period-us = <5880>;
+	qcom,brake-pattern = /bits/ 8 <0xff 0x3f 0x1f>;
+	status = "okay";
+};
+
 /*
  * 音量加键不是 PON 键（电源键走 &pon_pwrkey，音量减走 &pon_resin）：
  * stock DT（android.dts fragment@3/@20）把它挂在 PM8550 PMIC GPIO6 上，

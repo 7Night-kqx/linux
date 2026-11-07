@@ -225,6 +225,18 @@ config INPUT_PM8XXX_VIBRATOR
 	  To compile this driver as module, choose M here: the
 	  module will be called pm8xxx-vibrator.
 
+config INPUT_QCOM_PMIH0108_HAPTICS
+	tristate "Qualcomm PMIH0108 haptics support"
+	depends on MFD_SPMI_PMIC && OF
+	select INPUT_FF_MEMLESS
+	help
+	  Say Y to enable the HAP530 high-voltage haptics controller in
+	  Qualcomm PMIH0108. The driver supports LRA vibration through
+	  the input force-feedback interface using DIRECT_PLAY mode.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called qcom-pmih0108-haptics.
+
 config INPUT_PMIC8XXX_PWRKEY
 	tristate "PMIC8XXX power key support"
 	depends on MFD_PM8XXX
