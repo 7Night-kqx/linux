@@ -397,11 +397,13 @@ static int set_flash_timeout(struct qcom_flash_led *led, u32 timeout_ms)
 	for (i = 0; i < led->chan_count; i++) {
 		chan_id = led->chan_id[i];
 
-		timer = timeout_ms / FLASH_TIMER_STEP_MS;
-		timer = clamp_t(u8, timer, 0, FLASH_TIMER_VAL_MASK);
-
-		if (timeout_ms)
+		/* Code 0 is 10 ms; the enable bit distinguishes torch mode. */
+		timer = 0;
+		if (timeout_ms) {
+			timer = clamp_t(u32, timeout_ms / FLASH_TIMER_STEP_MS,
+					1, FLASH_TIMER_VAL_MASK + 1) - 1;
 			timer |= FLASH_TIMER_EN_BIT;
+		}
 
 		rc = regmap_fields_write(flash_data->r_fields[REG_CHAN_TIMER], chan_id, timer);
 		if (rc)
@@ -835,6 +837,12 @@ static int qcom_flash_register_led_device(struct device *dev,
 	return qcom_flash_v4l2_init(dev, led, node);
 }
 
+static void qcom_flash_release_v4l2(struct qcom_flash_data *flash_data)
+{
+	while (flash_data->leds_count)
+		v4l2_flash_release(flash_data->v4l2_flash[--flash_data->leds_count]);
+}
+
 static int qcom_flash_led_probe(struct platform_device *pdev)
 {
 	struct qcom_flash_data *flash_data;
@@ -953,8 +961,7 @@ static int qcom_flash_led_probe(struct platform_device *pdev)
 
 	return regmap_field_write(flash_data->r_fields[REG_TORCH_CLAMP], flash_data->torch_clamp);
 release:
-	while (flash_data->v4l2_flash[flash_data->leds_count] && flash_data->leds_count)
-		v4l2_flash_release(flash_data->v4l2_flash[flash_data->leds_count--]);
+	qcom_flash_release_v4l2(flash_data);
 	return rc;
 }
 
@@ -962,8 +969,7 @@ static void qcom_flash_led_remove(struct platform_device *pdev)
 {
 	struct qcom_flash_data *flash_data = platform_get_drvdata(pdev);
 
-	while (flash_data->v4l2_flash[flash_data->leds_count] && flash_data->leds_count)
-		v4l2_flash_release(flash_data->v4l2_flash[flash_data->leds_count--]);
+	qcom_flash_release_v4l2(flash_data);
 
 	mutex_destroy(&flash_data->lock);
 }
