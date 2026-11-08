@@ -520,6 +520,10 @@ static int cci_probe(struct platform_device *pdev)
 	if (!cci->data)
 		return -ENOENT;
 
+	/* Controller reset also waits on master 0 when its DT node is disabled. */
+	for (i = 0; i < cci->data->num_masters; i++)
+		init_completion(&cci->master[i].irq_complete);
+
 	for_each_available_child_of_node_scoped(dev->of_node, child) {
 		struct cci_master *master;
 		u32 idx;
@@ -559,7 +563,6 @@ static int cci_probe(struct platform_device *pdev)
 				master->mode = I2C_MODE_FAST_PLUS;
 		}
 
-		init_completion(&master->irq_complete);
 	}
 
 	/* Memory */

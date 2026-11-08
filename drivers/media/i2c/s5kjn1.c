@@ -7,6 +7,7 @@
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/units.h>
 #include <media/v4l2-cci.h>
@@ -55,6 +56,27 @@
 
 #define to_s5kjn1(_sd)			container_of(_sd, struct s5kjn1, sd)
 
+struct s5kjn1_dada_reg {
+	u16 address;
+	u16 value;
+	u32 delay_us;
+};
+
+#include "s5kjn1-dada-regs.h"
+#include "s5kjn1-still50.h"
+#include "s5kjn1-video60.h"
+
+static bool stock_video60;
+module_param(stock_video60, bool, 0444);
+MODULE_PARM_DESC(stock_video60, "Use the stock 60fps video mode");
+
+
+static bool stock_still50;
+module_param(stock_still50, bool, 0444);
+MODULE_PARM_DESC(stock_still50, "Use Ofilm stock mode0 for full-resolution still probes");
+
+static const s64 s5kjn1_dada_link_freq[] = { 985600000 };
+
 static const s64 s5kjn1_link_freq_menu[] = {
 	S5KJN1_LINK_FREQ_700MHZ,
 };
@@ -97,6 +119,8 @@ struct s5kjn1 {
 	struct regulator *afvdd;	/* Autofocus actuator power */
 	struct regulator *vdda;		/* Analog power */
 	struct regulator *vddd;		/* Digital core power */
+	bool dada;
+	struct regulator *vboost;
 	struct regulator *vddio;	/* Digital I/O power */
 
 	struct v4l2_subdev sd;
@@ -741,6 +765,51 @@ static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
 	},
 };
 
+static const struct s5kjn1_mode s5kjn1_dada_modes[] = {
+	{
+		.width = 4080,
+		.height = 3072,
+		.hts = 4584,
+		.vts = 4092,
+		.exposure = 256,
+		.exposure_margin = 12,
+	},
+	{
+		.width = 8160,
+		.height = 6144,
+		.hts = 8688,
+		.vts = 6400,
+		.exposure = 256,
+		.exposure_margin = 12,
+	},
+	{
+		.width = 3456,
+		.height = 2160,
+		.hts = 4096,
+		.vts = 2274,
+		.exposure = 256,
+		.exposure_margin = 12,
+	},
+};
+
+static int s5kjn1_dada_write(struct s5kjn1 *sensor,
+			     const struct s5kjn1_dada_reg *regs,
+			     unsigned int count)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < count; i++) {
+		ret = cci_write(sensor->regmap, CCI_REG16(regs[i].address),
+				regs[i].value, NULL);
+		if (ret)
+			return ret;
+		if (regs[i].delay_us)
+			fsleep(regs[i].delay_us);
+	}
+	return 0;
+}
+
 static int s5kjn1_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct s5kjn1 *s5kjn1 = container_of(ctrl->handler, struct s5kjn1,
@@ -763,7 +832,7 @@ static int s5kjn1_set_ctrl(struct v4l2_ctrl *ctrl)
 	}
 
 	/* V4L2 controls are applied, when sensor is powered up for streaming */
-	if (!pm_runtime_get_if_active(s5kjn1->dev))
+	if (!pm_runtime_get_if_in_use(s5kjn1->dev))
 		return 0;
 
 	switch (ctrl->id) {
@@ -816,36 +885,42 @@ static int s5kjn1_init_controls(struct s5kjn1 *s5kjn1)
 	struct v4l2_fwnode_device_properties props;
 	int ret;
 
-	v4l2_ctrl_handler_init(ctrl_hdlr, 9);
+	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 9);
+	if (ret)
+		return ret;
 
 	s5kjn1->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, &s5kjn1_ctrl_ops,
 					V4L2_CID_LINK_FREQ,
-					ARRAY_SIZE(s5kjn1_link_freq_menu) - 1,
-					0, s5kjn1_link_freq_menu);
+					s5kjn1->dada ? 0 : ARRAY_SIZE(s5kjn1_link_freq_menu) - 1,
+					0, s5kjn1->dada ? s5kjn1_dada_link_freq :
+					s5kjn1_link_freq_menu);
 	if (s5kjn1->link_freq)
 		s5kjn1->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	pixel_rate = s5kjn1_freq_to_pixel_rate(s5kjn1_link_freq_menu[0]);
-	s5kjn1->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
-					       V4L2_CID_PIXEL_RATE,
-					       0, pixel_rate, 1, pixel_rate);
+	/* Dada uses a fixed frame length until VT timing is validated. */
+	if (!s5kjn1->dada) {
+		pixel_rate = s5kjn1_freq_to_pixel_rate(s5kjn1_link_freq_menu[0]);
+		s5kjn1->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+						       V4L2_CID_PIXEL_RATE,
+						       0, pixel_rate, 1, pixel_rate);
 
-	hblank = mode->hts - mode->width;
-	s5kjn1->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
-					   V4L2_CID_HBLANK, hblank,
-					   hblank, 1, hblank);
-	if (s5kjn1->hblank)
-		s5kjn1->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+		hblank = mode->hts - mode->width;
+		s5kjn1->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+						   V4L2_CID_HBLANK, hblank,
+						   hblank, 1, hblank);
+		if (s5kjn1->hblank)
+			s5kjn1->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	vblank = mode->vts - mode->height;
-	s5kjn1->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
-					   V4L2_CID_VBLANK, vblank,
-					   S5KJN1_VTS_MAX - mode->height, 1,
-					   vblank);
+		vblank = mode->vts - mode->height;
+		s5kjn1->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+						   V4L2_CID_VBLANK, vblank,
+						   S5KJN1_VTS_MAX - mode->height, 1,
+						   vblank);
+	}
 
 	v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
 			  S5KJN1_AGAIN_MIN, S5KJN1_AGAIN_MAX,
-			  S5KJN1_AGAIN_STEP, S5KJN1_AGAIN_DEFAULT);
+			  S5KJN1_AGAIN_STEP, s5kjn1->dada ? 1 : S5KJN1_AGAIN_DEFAULT);
 
 	exposure_max = mode->vts - mode->exposure_margin;
 	s5kjn1->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
@@ -869,6 +944,11 @@ static int s5kjn1_init_controls(struct s5kjn1 *s5kjn1)
 					  V4L2_CID_VFLIP, 0, 1, 1, 0);
 	if (s5kjn1->vflip)
 		s5kjn1->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
+
+	if (ctrl_hdlr->error) {
+		ret = ctrl_hdlr->error;
+		goto error_free_hdlr;
+	}
 
 	ret = v4l2_fwnode_device_parse(s5kjn1->dev, &props);
 	if (ret)
@@ -901,6 +981,20 @@ static int s5kjn1_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		return ret;
 
+	if (s5kjn1->dada) {
+		ret = s5kjn1_dada_write(s5kjn1, s5kjn1_dada_init,
+					ARRAY_SIZE(s5kjn1_dada_init));
+		if (!ret)
+			ret = s5kjn1_dada_write(s5kjn1,
+				stock_video60 ? s5kjn1_dada_3456x2160 :
+				stock_still50 ? s5kjn1_dada_8160x6144 : s5kjn1_dada_4080x3072,
+				stock_video60 ? ARRAY_SIZE(s5kjn1_dada_3456x2160) :
+				stock_still50 ? ARRAY_SIZE(s5kjn1_dada_8160x6144) : ARRAY_SIZE(s5kjn1_dada_4080x3072));
+		if (ret)
+			goto error;
+		goto setup_controls;
+	}
+
 	/* Page pointer */
 	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
 
@@ -929,10 +1023,16 @@ static int s5kjn1_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto error;
 
+setup_controls:
 	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
 
-	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
-		  S5KJN1_MODE_STREAMING, &ret);
+	if (s5kjn1->dada) {
+		cci_write(s5kjn1->regmap, CCI_REG16(0x0100), 0x0100, &ret);
+		fsleep(4000);
+	} else {
+		cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+			  S5KJN1_MODE_STREAMING, &ret);
+	}
 	if (ret)
 		goto error;
 
@@ -997,6 +1097,9 @@ static int s5kjn1_set_pad_format(struct v4l2_subdev *sd,
 				      width, height,
 				      fmt->format.width, fmt->format.height);
 
+	if (s5kjn1->dada)
+		mode = &s5kjn1_dada_modes[stock_video60 ? 2 : stock_still50 ? 1 : 0];
+
 	s5kjn1_update_pad_format(s5kjn1, mode, &fmt->format);
 
 	/* Format code could be updated with respect to flip controls */
@@ -1050,15 +1153,17 @@ static int s5kjn1_enum_frame_size(struct v4l2_subdev *sd,
 {
 	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
 
-	if (fse->index >= ARRAY_SIZE(s5kjn1_supported_modes))
+	if (fse->index >= (s5kjn1->dada ? 1 : ARRAY_SIZE(s5kjn1_supported_modes)))
 		return -EINVAL;
 
 	if (fse->code != s5kjn1_get_format_code(s5kjn1))
 		return -EINVAL;
 
-	fse->min_width = s5kjn1_supported_modes[fse->index].width;
+	fse->min_width = s5kjn1->dada ? s5kjn1_dada_modes[stock_video60 ? 2 : stock_still50 ? 1 : 0].width :
+		s5kjn1_supported_modes[fse->index].width;
 	fse->max_width = fse->min_width;
-	fse->min_height = s5kjn1_supported_modes[fse->index].height;
+	fse->min_height = s5kjn1->dada ? s5kjn1_dada_modes[stock_video60 ? 2 : stock_still50 ? 1 : 0].height :
+		s5kjn1_supported_modes[fse->index].height;
 	fse->max_height = fse->min_height;
 
 	return 0;
@@ -1079,7 +1184,7 @@ static int s5kjn1_get_selection(struct v4l2_subdev *sd,
 		sel->r.left = 0;
 		sel->r.top = 0;
 		sel->r.width = s5kjn1->mode->width;
-		sel->r.height = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->height;
 		return 0;
 	default:
 		return -EINVAL;
@@ -1189,8 +1294,8 @@ static int s5kjn1_check_hwcfg(struct s5kjn1 *s5kjn1)
 
 	ret = v4l2_link_freq_to_bitmap(s5kjn1->dev, bus_cfg.link_frequencies,
 				       bus_cfg.nr_of_link_frequencies,
-				       s5kjn1_link_freq_menu,
-				       ARRAY_SIZE(s5kjn1_link_freq_menu),
+				       s5kjn1->dada ? s5kjn1_dada_link_freq : s5kjn1_link_freq_menu,
+				       s5kjn1->dada ? 1 : ARRAY_SIZE(s5kjn1_link_freq_menu),
 				       &freq_bitmap);
 
 endpoint_free:
@@ -1204,6 +1309,35 @@ static int s5kjn1_power_on(struct device *dev)
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
 	int ret;
+
+	if (s5kjn1->dada) {
+		/* Stock: BOB2, reset low, VIO, VDIG, VANA, reset high, MCLK. */
+		ret = regulator_enable(s5kjn1->vboost);
+		if (ret)
+			return ret;
+		fsleep(2000);
+		gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+		fsleep(1000);
+		ret = regulator_enable(s5kjn1->vddio);
+		if (ret)
+			goto dada_disable_boost;
+		fsleep(1000);
+		ret = regulator_enable(s5kjn1->vddd);
+		if (ret)
+			goto dada_disable_io;
+		fsleep(5000);
+		ret = regulator_enable(s5kjn1->vdda);
+		if (ret)
+			goto dada_disable_core;
+		fsleep(3000);
+		gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+		fsleep(5000);
+		ret = clk_prepare_enable(s5kjn1->mclk);
+		if (ret)
+			goto dada_disable_analog;
+		fsleep(25000);
+		return 0;
+	}
 
 	if (s5kjn1->vddd) {
 		ret = regulator_enable(s5kjn1->vddd);
@@ -1259,12 +1393,33 @@ disable_vddd:
 	}
 
 	return ret;
+
+dada_disable_analog:
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+	regulator_disable(s5kjn1->vdda);
+dada_disable_core:
+	regulator_disable(s5kjn1->vddd);
+dada_disable_io:
+	regulator_disable(s5kjn1->vddio);
+dada_disable_boost:
+	regulator_disable(s5kjn1->vboost);
+	return ret;
 }
 
 static int s5kjn1_power_off(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+
+	if (s5kjn1->dada) {
+		gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+		clk_disable_unprepare(s5kjn1->mclk);
+		regulator_disable(s5kjn1->vdda);
+		regulator_disable(s5kjn1->vddd);
+		regulator_disable(s5kjn1->vddio);
+		regulator_disable(s5kjn1->vboost);
+		return 0;
+	}
 
 	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
 
@@ -1298,6 +1453,7 @@ static int s5kjn1_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	s5kjn1->dev = &client->dev;
+	s5kjn1->dada = device_is_compatible(s5kjn1->dev, "xiaomi,dada-s5kjn1");
 	v4l2_i2c_subdev_init(&s5kjn1->sd, client, &s5kjn1_subdev_ops);
 
 	s5kjn1->regmap = devm_cci_regmap_init_i2c(client, 16);
@@ -1311,7 +1467,7 @@ static int s5kjn1_probe(struct i2c_client *client)
 				     "failed to get MCLK clock\n");
 
 	freq = clk_get_rate(s5kjn1->mclk);
-	if (freq != S5KJN1_MCLK_FREQ_24MHZ)
+	if (freq != (s5kjn1->dada ? 19200000 : S5KJN1_MCLK_FREQ_24MHZ))
 		return dev_err_probe(s5kjn1->dev, -EINVAL,
 				     "MCLK clock frequency %lu is not supported\n",
 				     freq);
@@ -1371,6 +1527,21 @@ static int s5kjn1_probe(struct i2c_client *client)
 		s5kjn1->vddio = NULL;
 	}
 
+	if (s5kjn1->dada) {
+		if (!s5kjn1->vddio || !s5kjn1->vddd || !s5kjn1->vdda ||
+		    !s5kjn1->reset_gpio)
+			return dev_err_probe(s5kjn1->dev, -EINVAL,
+					     "Dada requires three rails and reset GPIO\n");
+		s5kjn1->vboost = devm_regulator_get(s5kjn1->dev, "vboost");
+		if (IS_ERR(s5kjn1->vboost))
+			return dev_err_probe(s5kjn1->dev, PTR_ERR(s5kjn1->vboost),
+					     "Cannot get camera boost rail\n");
+		ret = regulator_set_voltage(s5kjn1->vboost, 3296000, 3296000);
+		if (ret)
+			return dev_err_probe(s5kjn1->dev, ret,
+					     "Cannot set camera boost voltage\n");
+	}
+
 	/* The sensor must be powered on to read the CHIP_ID register */
 	ret = s5kjn1_power_on(s5kjn1->dev);
 	if (ret)
@@ -1382,7 +1553,8 @@ static int s5kjn1_probe(struct i2c_client *client)
 		goto power_off;
 	}
 
-	s5kjn1->mode = &s5kjn1_supported_modes[0];
+	s5kjn1->mode = s5kjn1->dada ? &s5kjn1_dada_modes[stock_video60 ? 2 : stock_still50 ? 1 : 0] :
+		&s5kjn1_supported_modes[0];
 	ret = s5kjn1_init_controls(s5kjn1);
 	if (ret) {
 		dev_err_probe(s5kjn1->dev, ret, "failed to init controls\n");
@@ -1466,6 +1638,7 @@ static const struct dev_pm_ops s5kjn1_pm_ops = {
 
 static const struct of_device_id s5kjn1_of_match[] = {
 	{ .compatible = "samsung,s5kjn1" },
+	{ .compatible = "xiaomi,dada-s5kjn1" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, s5kjn1_of_match);

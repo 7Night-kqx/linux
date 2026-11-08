@@ -643,6 +643,24 @@ config VIDEO_OV6211
 	  To compile this driver as a module, choose M here: the
 	  module will be called ov6211.
 
+config VIDEO_OVX9100
+	tristate "OmniVision OVX9100 experimental sensor"
+	depends on I2C
+	select V4L2_CCI_I2C
+	help
+	  Probe/runtime PM and gated fixed RAW10 mode for Xiaomi dada.
+	  Requires characterized C-PHY parameters and module identification.
+	  The rear sensor board node remains disabled by default.
+	  This experimental driver does not implement autofocus or OIS.
+
+config VIDEO_OV32B40
+	tristate "OmniVision OV32B40 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  Fixed 6528x4896 RAW10 support for the OV32B40 sensor.
+	  Exposure, gain and pixel-array timing are not configurable yet.
+	  To compile as a module, choose M; the module is ov32b40.
+
 config VIDEO_OV64A40
 	tristate "OmniVision OV64A40 sensor support"
 	select V4L2_CCI_I2C
@@ -816,6 +834,18 @@ config VIDEO_S5K6A3
 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
 	  camera sensor.
 
+config VIDEO_S5KJN5
+	tristate "Samsung S5KJN5 sensor support"
+	depends on GPIOLIB
+	select V4L2_CCI_I2C
+	help
+	  This is a V4L2 sensor driver for Samsung S5KJN5 50MP
+	  10-bit RAW MIPI CSI-2 camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kjn5.
+
+
 config VIDEO_S5KJN1
 	tristate "Samsung S5KJN1 sensor support"
 	select V4L2_CCI_I2C
@@ -907,6 +937,15 @@ config VIDEO_AD5820
 	help
 	  This is a driver for the AD5820 camera lens voice coil.
 	  It is used for example in Nokia N900 (RX-51).
+
+config VIDEO_DADA_VCM
+	tristate "Xiaomi dada experimental lens actuators"
+	depends on I2C && OF && PM
+	help
+	  Experimental V4L2 focus support for the AK7316 and GT9764V lenses.
+	  Shared power/reset/MCLK remain owned by the associated camera sensor.
+	  Module-specific calibration and gravity-aware parking remain pending.
+	  The module is called dada-vcm.
 
 config VIDEO_AK7375
 	tristate "AK7375 lens voice coil support"

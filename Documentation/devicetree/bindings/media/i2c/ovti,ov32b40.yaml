@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/ovti,ov32b40.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: OmniVision OV32B40 image sensor
+
+maintainers:
+  - 7Night-kqx <7Night-kqx@users.noreply.github.com>
+
+description: |
+  32 megapixel image sensor with a MIPI CSI-2 D-PHY interface. The initial
+  driver implements the fixed 6528x4896 RAW10 mode with a 19.2 MHz clock.
+
+allOf:
+  - $ref: /schemas/media/video-interface-devices.yaml#
+
+properties:
+  compatible:
+    const: ovti,ov32b40
+  reg:
+    maxItems: 1
+  clocks:
+    maxItems: 1
+  power-domains:
+    maxItems: 1
+    description: Camera interface power domain required by the sensor clock.
+  avdd-supply:
+    description: Analogue supply, 2.8 V.
+  dovdd-supply:
+    description: Digital I/O supply, 1.8 V.
+  dvdd-supply:
+    description: Digital core supply, 1.104 V on Xiaomi dada.
+  reset-gpios:
+    maxItems: 1
+    description: Active low reset.
+  port:
+    $ref: /schemas/graph.yaml#/$defs/port-base
+    unevaluatedProperties: false
+    properties:
+      endpoint:
+        $ref: /schemas/media/video-interfaces.yaml#
+        unevaluatedProperties: false
+        properties:
+          bus-type:
+            const: 4
+          data-lanes:
+            items:
+              - const: 1
+              - const: 2
+              - const: 3
+              - const: 4
+          link-frequencies:
+            items:
+              - const: 842400000
+        required:
+          - data-lanes
+          - link-frequencies
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - avdd-supply
+  - dovdd-supply
+  - dvdd-supply
+  - reset-gpios
+  - port
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        camera@10 {
+            compatible = "ovti,ov32b40";
+            reg = <0x10>;
+            clocks = <&camclk>;
+            avdd-supply = <&avdd>;
+            dovdd-supply = <&dovdd>;
+            dvdd-supply = <&dvdd>;
+            reset-gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
+            port {
+                endpoint {
+                    bus-type = <4>;
+                    data-lanes = <1 2 3 4>;
+                    link-frequencies = /bits/ 64 <842400000>;
+                };
+            };
+        };
+    };

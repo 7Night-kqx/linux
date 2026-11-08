@@ -12,6 +12,7 @@
 
 #include <linux/clk.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 #include <media/media-entity.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -65,6 +66,8 @@ struct csid_testgen_config {
 };
 
 struct csid_phy_config {
+	bool is_cphy;
+	u8 image_vc;
 	u8 csiphy_id;
 	u8 lane_cnt;
 	u32 lane_assign;
@@ -155,11 +158,15 @@ struct csid_device {
 	u32 irq;
 	char irq_name[30];
 	u32 reg_update;
+	u32 rup_update;
+	u32 aup_update;
 	struct camss_clock *clock;
 	int nclocks;
 	struct regulator_bulk_data *supplies;
 	int num_supplies;
 	struct completion reset_complete;
+	struct delayed_work packet_diag_work;
+	u8 packet_diag_samples;
 	struct csid_testgen_config testgen;
 	bool tpg_linked;
 	struct csid_phy_config phy;
@@ -216,6 +223,8 @@ extern const struct csid_hw_ops csid_ops_4_1;
 extern const struct csid_hw_ops csid_ops_4_7;
 extern const struct csid_hw_ops csid_ops_340;
 extern const struct csid_hw_ops csid_ops_680;
+extern const struct csid_hw_ops csid_ops_980;
+void csid_980_diag_snapshot(struct csid_device *csid, const char *stage);
 extern const struct csid_hw_ops csid_ops_gen2;
 extern const struct csid_hw_ops csid_ops_gen3;
 

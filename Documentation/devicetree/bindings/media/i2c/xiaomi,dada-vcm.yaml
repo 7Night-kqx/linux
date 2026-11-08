@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/xiaomi,dada-vcm.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Xiaomi dada experimental camera lens actuators
+
+maintainers:
+  - 7Night-kqx <7Night-kqx@users.noreply.github.com>
+
+description: |
+  Module-specific experimental AK7316 and GT9764V focus support. The linked
+  camera sensor owns shared regulators, reset and MCLK. Runtime PM keeps that
+  sensor powered while the lens is accessed. EEPROM calibration and
+  gravity-dependent AK7316 parking are not implemented.
+
+properties:
+  compatible:
+    enum:
+      - xiaomi,dada-ak7316
+      - xiaomi,dada-gt9764v
+
+  reg:
+    const: 0x0c
+
+  xiaomi,power-sensor:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Camera sensor controlling the shared module power sequence.
+
+required:
+  - compatible
+  - reg
+  - xiaomi,power-sensor
+
+additionalProperties: false

@@ -41,6 +41,7 @@ struct csiphy_lanes_cfg {
 };
 
 struct csiphy_csi2_cfg {
+	enum v4l2_mbus_type bus_type;
 	struct csiphy_lanes_cfg lane_cfg;
 };
 
@@ -130,6 +131,9 @@ void msm_csiphy_unregister_entity(struct csiphy_device *csiphy);
 extern const struct csiphy_formats csiphy_formats_8x16;
 extern const struct csiphy_formats csiphy_formats_8x96;
 extern const struct csiphy_formats csiphy_formats_sdm845;
+
+int csiphy_230_cphy_enable(struct csiphy_device *csiphy, u8 lane_mask);
+int csiphy_230_cphy_validate(struct csiphy_device *csiphy);
 
 extern const struct csiphy_hw_ops csiphy_ops_2ph_1_0;
 extern const struct csiphy_hw_ops csiphy_ops_3ph_1_0;

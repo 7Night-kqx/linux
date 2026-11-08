@@ -61,6 +61,7 @@
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include "sm8750.dtsi"
 #include "pm8010.dtsi"
+#include "sm8750-xiaomi-dada-camera.dtsi"
 #include "pm8550.dtsi"
 #define PMK8550VE_SID 8
 #include "pm8550ve.dtsi"
@@ -231,7 +232,7 @@
 		vreg_bob2: bob2 {
 			regulator-name = "vreg_bob2";
 			regulator-min-microvolt = <2704000>;
-			regulator-max-microvolt = <3008000>;
+			regulator-max-microvolt = <3304000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
@@ -1113,7 +1114,7 @@
 	regulators-0 {
 		vreg_l11b_1p0: ldo11 {
 			regulator-name = "vreg_l11b_1p0";
-			regulator-min-microvolt = <1064000>;
+			regulator-min-microvolt = <1000000>;
 			regulator-max-microvolt = <1292000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 			regulator-allow-set-load;

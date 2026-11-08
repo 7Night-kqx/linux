@@ -46,6 +46,9 @@ quiet_cmd_gen_dtbs_list = GEN     $@
 targets += .builtin-dtbs-list
 
 ifdef CONFIG_GENERIC_BUILTIN_DTB
+# .incbin inputs are invisible to the C preprocessor dependency scanner.
+.builtin-dtbs.o: $(shell cat .builtin-dtbs-list 2>/dev/null)
+
 targets += .builtin-dtbs.S .builtin-dtbs.o
 vmlinux.unstripped: .builtin-dtbs.o
 endif

@@ -147,7 +147,10 @@ static int csiphy_set_clock_rates(struct csiphy_device *csiphy)
 
 	link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes);
 	if (link_freq < 0)
-		link_freq  = 0;
+		link_freq = 0;
+	if (csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY)
+		/* Select first supported (400 MHz) rate without D-PHY arithmetic. */
+		link_freq = 4;
 
 	for (i = 0; i < csiphy->nclocks; i++) {
 		struct camss_clock *clock = &csiphy->clock[i];
@@ -207,6 +210,12 @@ static int csiphy_set_power(struct v4l2_subdev *sd, int on)
 
 	if (on) {
 		int ret;
+
+		if (csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY) {
+			ret = csiphy_230_cphy_validate(csiphy);
+			if (ret)
+				return ret;
+		}
 
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
@@ -272,6 +281,15 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
 	u8 num_lanes = csiphy->cfg.csi2->lane_cfg.num_data;
 	u8 val;
 
+	if (cfg->csi2->bus_type == V4L2_MBUS_CSI2_CPHY) {
+		unsigned int i;
+
+		lane_mask = 0;
+		for (i = 0; i < num_lanes; i++)
+			lane_mask |= BIT(2 * cfg->csi2->lane_cfg.data[i].pos + 1);
+		return csiphy_230_cphy_enable(csiphy, lane_mask);
+	}
+
 	link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes);
 
 	if (link_freq < 0) {
@@ -295,9 +313,44 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
 		wmb();
 	}
 
+	if (camera_diagnostics)
+		dev_info(csiphy->camss->dev,
+			 "phy-diag: phy%u csid%u lanes%u assign-mask %02x link %lld\n",
+			 csiphy->id, cfg->csid_id, num_lanes, lane_mask, link_freq);
 	csiphy->res->hw_ops->lanes_enable(csiphy, cfg, link_freq, lane_mask);
 
 	return 0;
+}
+
+static void csiphy_diag_config(struct csiphy_device *csiphy, const char *stage)
+{
+	static const u16 common[] = { 0x1000, 0x1014, 0x1018, 0x101c, 0x108c, 0x1184 };
+	static const u16 cphy[] = {
+		0x208, 0x20c, 0x268, 0x26c, 0x278, 0x28c, 0x340, 0x358,
+	};
+	static const u16 dphy[] = { 0x008, 0x00c, 0x05c, 0x060, 0x064, 0x094, 0x0c0 };
+	const u16 *regs;
+	unsigned int i, lane, count;
+	bool is_cphy = csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY;
+
+	if (!camera_diagnostics || csiphy->camss->res->version != CAMSS_8750)
+		return;
+	for (i = 0; i < ARRAY_SIZE(common); i++)
+		dev_info(csiphy->camss->dev,
+			 "phy-config: %s phy%u cphy%u reg%04x val%08x timer%u\n",
+			 stage, csiphy->id, is_cphy, common[i],
+			 readl(csiphy->base + common[i]), csiphy->timer_clk_rate);
+	regs = is_cphy ? cphy : dphy;
+	count = is_cphy ? ARRAY_SIZE(cphy) : ARRAY_SIZE(dphy);
+	for (lane = 0; lane < csiphy->cfg.csi2->lane_cfg.num_data; lane++) {
+		u32 offset = 0x400 * csiphy->cfg.csi2->lane_cfg.data[lane].pos;
+
+		for (i = 0; i < count; i++)
+			dev_info(csiphy->camss->dev,
+				 "phy-config: %s phy%u lane%u reg%04x val%08x\n",
+				 stage, csiphy->id, lane, offset + regs[i],
+				 readl(csiphy->base + offset + regs[i]));
+	}
 }
 
 /*
@@ -308,7 +361,17 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
  */
 static void csiphy_stream_off(struct csiphy_device *csiphy)
 {
+	csiphy_diag_config(csiphy, "before-off");
+	if (camera_diagnostics && csiphy->camss->res->version == CAMSS_8750) {
+		unsigned int i;
+
+		for (i = 0; i < 11; i++)
+			dev_info(csiphy->camss->dev,
+				 "phy-diag: phy%u status%u %08x\n", csiphy->id, i,
+				 readl(csiphy->base + 0x1138 + 4 * i));
+	}
 	csiphy->res->hw_ops->lanes_disable(csiphy, &csiphy->cfg);
+	csiphy_diag_config(csiphy, "after-off");
 }
 
 
@@ -324,10 +387,13 @@ static int csiphy_set_stream(struct v4l2_subdev *sd, int enable)
 	struct csiphy_device *csiphy = v4l2_get_subdevdata(sd);
 	int ret = 0;
 
-	if (enable)
+	if (enable) {
 		ret = csiphy_stream_on(csiphy);
-	else
+		if (!ret)
+			csiphy_diag_config(csiphy, "after-on");
+	} else {
 		csiphy_stream_off(csiphy);
+	}
 
 	return ret;
 }
@@ -381,7 +447,8 @@ static void csiphy_try_format(struct csiphy_device *csiphy,
 		if (i >= csiphy->res->formats->nformats)
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
-		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
+		fmt->width = clamp_t(u32, fmt->width, 1,
+			csiphy->camss->res->version == CAMSS_8750 ? 8192 : 8191);
 		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
 
 		fmt->field = V4L2_FIELD_NONE;

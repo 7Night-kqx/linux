@@ -21,7 +21,9 @@ allOf:
 
 properties:
   compatible:
-    const: samsung,s5kjn1
+    enum:
+      - samsung,s5kjn1
+      - xiaomi,dada-s5kjn1
 
   reg:
     maxItems: 1
@@ -29,6 +31,12 @@ properties:
   clocks:
     description: MCLK supply clock.
     maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  vboost-supply:
+    description: Camera boost rail used by the Xiaomi dada module.
 
   reset-gpios:
     description: Active low GPIO connected to RESET pad of the sensor.

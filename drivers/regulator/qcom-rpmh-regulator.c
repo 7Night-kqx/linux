@@ -549,6 +549,18 @@ static int rpmh_regulator_init_vreg(struct rpmh_vreg *vreg, struct device *dev,
 		vreg->rdesc.n_voltages = rpmh_data->hw_data->n_voltages;
 	}
 
+	/* Dada firmware accepts BOB2 millivolt votes, including camera 3.296 V. */
+	if (of_machine_is_compatible("xiaomi,dada") &&
+	    !strcmp(rpmh_resource_name, "bobb2")) {
+		static const struct linear_range dada_bob2_range[] = {
+			REGULATOR_LINEAR_RANGE(2704000, 0, 592, 1000),
+		};
+
+		vreg->rdesc.linear_ranges = dada_bob2_range;
+		vreg->rdesc.n_linear_ranges = ARRAY_SIZE(dada_bob2_range);
+		vreg->rdesc.n_voltages = 593;
+	}
+
 	vreg->always_wait_for_ack = of_property_read_bool(node,
 						"qcom,always-wait-for-ack");
 
@@ -1534,6 +1546,7 @@ static const struct rpmh_vreg_init_data pm8010_vreg_data[] = {
 	RPMH_VREG("ldo5",  LDO,  5, &pmic5_pldo502,   "vdd-l5"),
 	RPMH_VREG("ldo6",  LDO,  6, &pmic5_pldo502ln, "vdd-l6"),
 	RPMH_VREG("ldo7",  LDO,  7, &pmic5_pldo502,   "vdd-l7"),
+	{}
 };
 
 static const struct rpmh_vreg_init_data pm6150_vreg_data[] = {

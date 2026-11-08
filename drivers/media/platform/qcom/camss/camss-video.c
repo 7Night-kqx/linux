@@ -7,6 +7,7 @@
  * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Copyright (C) 2015-2018 Linaro Ltd.
  */
+#include <linux/delay.h>
 #include <linux/slab.h>
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
@@ -155,7 +156,10 @@ static int video_buf_init(struct vb2_buffer *vb)
 	const struct v4l2_pix_format_mplane *format =
 						&video->active_fmt.fmt.pix_mp;
 	struct sg_table *sgt;
-	unsigned int i;
+	struct scatterlist *sg;
+	dma_addr_t end;
+	unsigned int i, j;
+	size_t contiguous;
 
 	for (i = 0; i < format->num_planes; i++) {
 		sgt = vb2_dma_sg_plane_desc(vb, i);
@@ -163,6 +167,16 @@ static int video_buf_init(struct vb2_buffer *vb)
 			return -EFAULT;
 
 		buffer->addr[i] = sg_dma_address(sgt->sgl);
+		end = buffer->addr[i];
+		contiguous = 0;
+		for_each_sgtable_dma_sg(sgt, sg, j) {
+			if (sg_dma_address(sg) != end)
+				break;
+			contiguous += sg_dma_len(sg);
+			end += sg_dma_len(sg);
+		}
+		if (contiguous < format->plane_fmt[i].sizeimage)
+			return -EINVAL;
 	}
 
 	if (format->pixelformat == V4L2_PIX_FMT_NV12 ||
@@ -192,6 +206,9 @@ static int video_buf_prepare(struct vb2_buffer *vb)
 	}
 
 	vbuf->field = V4L2_FIELD_NONE;
+
+	if (video->ops->prepare_buffer)
+		return video->ops->prepare_buffer(video, vb);
 
 	return 0;
 }
@@ -249,11 +266,75 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	return ret;
 }
 
+/* Stop the started subdevices, excluding the one that failed to start. */
+static bool video_stop_sensor_first(struct camss_video *video)
+{
+	struct v4l2_subdev *subdevs[16];
+	struct media_entity *entity = &video->vdev.entity;
+	unsigned int count = 0;
+	int ret;
+
+	if (!camera_diagnostics || video->camss->res->version != CAMSS_8750)
+		return false;
+	while (entity->pads[0].flags & MEDIA_PAD_FL_SINK) {
+		struct media_pad *pad = media_pad_remote_pad_first(&entity->pads[0]);
+
+		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+			break;
+		if (count == ARRAY_SIZE(subdevs))
+			return false;
+		entity = pad->entity;
+		subdevs[count++] = media_entity_to_v4l2_subdev(entity);
+	}
+	if (!count || entity->function != MEDIA_ENT_F_CAM_SENSOR)
+		return false;
+	/* Cut off the producer while CSID and the write master can still drain. */
+	while (count) {
+		struct v4l2_subdev *sd = subdevs[--count];
+
+		ret = v4l2_subdev_call(sd, video, s_stream, 0);
+		dev_info(video->camss->dev, "stop-order: %s rc%d\n", sd->name, ret);
+		if (ret && ret != -ENOIOCTLCMD)
+			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
+		if (sd->entity.function == MEDIA_ENT_F_CAM_SENSOR)
+			fsleep(100000);
+	}
+	return true;
+}
+
+static void video_stop_subdevices(struct camss_video *video,
+				  struct media_entity *stop)
+{
+	struct media_entity *entity = &video->vdev.entity;
+	struct v4l2_subdev *subdev;
+	struct media_pad *pad;
+	int ret;
+
+	if (!stop && video_stop_sensor_first(video))
+		return;
+
+	while (entity != stop) {
+		pad = &entity->pads[0];
+		if (!(pad->flags & MEDIA_PAD_FL_SINK))
+			break;
+		pad = media_pad_remote_pad_first(pad);
+		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+			break;
+		entity = pad->entity;
+		if (entity == stop)
+			break;
+		subdev = media_entity_to_v4l2_subdev(entity);
+		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
+		if (ret && ret != -ENOIOCTLCMD)
+			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
+	}
+}
+
 static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
 	struct video_device *vdev = &video->vdev;
-	struct media_entity *entity;
+	struct media_entity *entity = &vdev->entity;
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
 	int ret;
@@ -268,7 +349,6 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (ret < 0)
 		goto error;
 
-	entity = &vdev->entity;
 	while (1) {
 		pad = &entity->pads[0];
 		if (!(pad->flags & MEDIA_PAD_FL_SINK))
@@ -289,6 +369,7 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 
 error:
+	video_stop_subdevices(video, entity);
 	video_device_pipeline_stop(vdev);
 
 flush_buffers:
@@ -300,35 +381,9 @@ flush_buffers:
 static void video_stop_streaming(struct vb2_queue *q)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
-	struct video_device *vdev = &video->vdev;
-	struct media_entity *entity;
-	struct media_pad *pad;
-	struct v4l2_subdev *subdev;
-	int ret;
 
-	entity = &vdev->entity;
-	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			break;
-
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
-			break;
-
-		entity = pad->entity;
-		subdev = media_entity_to_v4l2_subdev(entity);
-
-		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
-
-		if (ret) {
-			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
-			return;
-		}
-	}
-
-	video_device_pipeline_stop(vdev);
-
+	video_stop_subdevices(video, NULL);
+	video_device_pipeline_stop(&video->vdev);
 	video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
 }
 
@@ -441,7 +496,9 @@ static int video_enum_framesizes(struct file *file, void *fh,
 
 	fsize->type = V4L2_FRMSIZE_TYPE_CONTINUOUS;
 	fsize->stepwise.min_width = CAMSS_FRAME_MIN_WIDTH;
-	fsize->stepwise.max_width = CAMSS_FRAME_MAX_WIDTH;
+	fsize->stepwise.max_width =
+		video->camss->res->version == CAMSS_8750 && !video->line_based ?
+		8192 : CAMSS_FRAME_MAX_WIDTH;
 	fsize->stepwise.min_height = CAMSS_FRAME_MIN_HEIGHT;
 	fsize->stepwise.max_height = (video->line_based) ?
 		CAMSS_FRAME_MAX_HEIGHT_PIX : CAMSS_FRAME_MAX_HEIGHT_RDI;
@@ -501,7 +558,9 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 	memset(pix_mp, 0, sizeof(*pix_mp));
 
 	pix_mp->pixelformat = fi->pixelformat;
-	pix_mp->width = clamp_t(u32, width, 1, CAMSS_FRAME_MAX_WIDTH);
+	pix_mp->width = clamp_t(u32, width, 1,
+		video->camss->res->version == CAMSS_8750 && !video->line_based ?
+		8192 : CAMSS_FRAME_MAX_WIDTH);
 	pix_mp->height = clamp_t(u32, height, 1, CAMSS_FRAME_MAX_HEIGHT_RDI);
 	pix_mp->num_planes = fi->planes;
 	for (i = 0; i < pix_mp->num_planes; i++) {
@@ -511,6 +570,12 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 		pix_mp->plane_fmt[i].bytesperline = bpl;
 		pix_mp->plane_fmt[i].sizeimage = pix_mp->height /
 			fi->vsub[i].numerator * fi->vsub[i].denominator * bpl;
+		/* Gen4 frame-mode DMA addresses and increments use 256-byte units.
+		 * Pad capacity, preserving the sensor image height and row stride.
+		 */
+		if (video->camss->res->version == CAMSS_8750 && !video->line_based)
+			pix_mp->plane_fmt[i].sizeimage =
+				ALIGN(pix_mp->plane_fmt[i].sizeimage, 256);
 	}
 
 	pix_mp->field = V4L2_FIELD_NONE;

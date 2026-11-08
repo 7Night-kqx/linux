@@ -77,6 +77,7 @@ struct vfe_output {
 	};
 	enum vfe_output_state state;
 	unsigned int sequence;
+	bool frame_started;
 
 	int wait_reg_update;
 	struct completion sof;
@@ -118,6 +119,7 @@ struct vfe_hw_ops {
 			     struct vfe_line *line);
 	void (*vfe_wm_stop)(struct vfe_device *vfe, u8 wm);
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
+	void (*frame_start)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
 };
@@ -133,6 +135,7 @@ struct vfe_isr_ops {
 
 struct vfe_subdev_resources {
 	bool is_lite;
+	bool reg_update_after_csid_config;
 	u8 line_num;
 	bool has_pd;
 	char *pd_name;
@@ -249,6 +252,7 @@ extern const struct vfe_hw_ops vfe_ops_340;
 extern const struct vfe_hw_ops vfe_ops_480;
 extern const struct vfe_hw_ops vfe_ops_680;
 extern const struct vfe_hw_ops vfe_ops_gen3;
+extern const struct vfe_hw_ops vfe_ops_gen4;
 
 int vfe_get(struct vfe_device *vfe);
 void vfe_put(struct vfe_device *vfe);
@@ -284,6 +288,7 @@ int vfe_enable_v2(struct vfe_line *line);
  * @wm: Write master id
  */
 void vfe_buf_done(struct vfe_device *vfe, int wm);
+void vfe_frame_start(struct vfe_device *vfe, int wm);
 
 /*
  * vfe_get_output_v2 - Get vfe output line

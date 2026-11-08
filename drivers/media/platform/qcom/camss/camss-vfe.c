@@ -20,6 +20,7 @@
 #include <linux/spinlock.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-subdev.h>
 
 #include "camss-vfe.h"
@@ -352,6 +353,7 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 	case CAMSS_845:
 	case CAMSS_8550:
 	case CAMSS_8650:
+	case CAMSS_8750:
 	case CAMSS_8775P:
 	case CAMSS_X1E80100:
 		switch (sink_code) {
@@ -442,6 +444,34 @@ u32 vfe_hw_version(struct vfe_device *vfe)
 	return hw_version;
 }
 
+void vfe_frame_start(struct vfe_device *vfe, int wm)
+{
+	struct v4l2_event event = { .type = V4L2_EVENT_FRAME_SYNC };
+	struct vfe_output *output;
+	struct vfe_line *line;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (vfe->wm_output_map[wm] == VFE_LINE_NONE)
+		goto out_unlock;
+
+	line = &vfe->line[vfe->wm_output_map[wm]];
+	output = &line->output;
+	if (output->state != VFE_OUTPUT_ON)
+		goto out_unlock;
+
+	/* Count frames even when there is no buffer available for capture. */
+	event.u.frame_sync.frame_sequence = output->sequence++;
+	output->frame_started = true;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	v4l2_event_queue(line->subdev.devnode, &event);
+	return;
+
+out_unlock:
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+}
+
 /*
  * vfe_buf_done - Process write master done interrupt
  * @vfe: VFE Device
@@ -449,13 +479,14 @@ u32 vfe_hw_version(struct vfe_device *vfe)
  */
 void vfe_buf_done(struct vfe_device *vfe, int wm)
 {
-	struct vfe_line *line = &vfe->line[vfe->wm_output_map[wm]];
+	struct vfe_line *line;
 	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
 	struct camss_buffer *ready_buf;
 	struct vfe_output *output;
 	unsigned long flags;
 	u32 index;
 	u64 ts = ktime_get_ns();
+	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -464,7 +495,8 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 				    "Received wm done for unmapped index\n");
 		goto out_unlock;
 	}
-	output = &vfe->line[vfe->wm_output_map[wm]].output;
+	line = &vfe->line[vfe->wm_output_map[wm]];
+	output = &line->output;
 
 	ready_buf = output->buf[0];
 	if (!ready_buf) {
@@ -474,7 +506,17 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 	}
 
 	ready_buf->vb.vb2_buf.timestamp = ts;
-	ready_buf->vb.sequence = output->sequence++;
+	if (ops->frame_start) {
+		if (output->frame_started) {
+			ready_buf->vb.sequence = output->sequence - 1;
+		} else {
+			ready_buf->vb.sequence = output->sequence;
+			state = VB2_BUF_STATE_ERROR;
+		}
+		output->frame_started = false;
+	} else {
+		ready_buf->vb.sequence = output->sequence++;
+	}
 
 	index = 0;
 	output->buf[0] = output->buf[1];
@@ -494,7 +536,7 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+	vb2_buffer_done(&ready_buf->vb.vb2_buf, state);
 
 	return;
 
@@ -540,6 +582,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	output->state = VFE_OUTPUT_ON;
 
 	output->sequence = 0;
+	output->frame_started = false;
 	output->wait_reg_update = 0;
 	reinit_completion(&output->reg_update);
 
@@ -552,7 +595,9 @@ int vfe_enable_output_v2(struct vfe_line *line)
 		output->gen2.active_num++;
 		ops->vfe_wm_update(vfe, output->wm_idx[0],
 				   output->buf[i]->addr[0], line);
-		ops->reg_update(vfe, line->id);
+
+		if (!vfe->res->reg_update_after_csid_config)
+			ops->reg_update(vfe, line->id);
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
@@ -1351,7 +1396,8 @@ static void vfe_try_format(struct vfe_line *line,
 		if (i >= line->nformats)
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
-		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
+		fmt->width = clamp_t(u32, fmt->width, 1,
+			to_vfe(line)->camss->res->version == CAMSS_8750 && line->id != VFE_LINE_PIX ? 8192 : 8191);
 		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
 
 		fmt->field = V4L2_FIELD_NONE;
@@ -1966,8 +2012,24 @@ static int vfe_link_setup(struct media_entity *entity,
 	return 0;
 }
 
+static int vfe_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+			       struct v4l2_event_subscription *sub)
+{
+	struct vfe_line *line = v4l2_get_subdevdata(sd);
+	struct vfe_device *vfe = to_vfe(line);
+
+	if (!vfe->res->hw_ops->frame_start)
+		return -ENOIOCTLCMD;
+
+	if (sub->type != V4L2_EVENT_FRAME_SYNC || sub->id)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 16, NULL);
+}
+
 static const struct v4l2_subdev_core_ops vfe_core_ops = {
 	.s_power = vfe_set_power,
+	.subscribe_event = vfe_subscribe_event,
 };
 
 static const struct v4l2_subdev_video_ops vfe_video_ops = {
@@ -2012,6 +2074,7 @@ static int vfe_bpl_align_rdi(struct vfe_device *vfe)
 	case CAMSS_845:
 	case CAMSS_8550:
 	case CAMSS_8650:
+	case CAMSS_8750:
 	case CAMSS_8775P:
 	case CAMSS_X1E80100:
 		ret = 16;
@@ -2073,6 +2136,8 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		v4l2_subdev_init(sd, &vfe_v4l2_ops);
 		sd->internal_ops = &vfe_v4l2_internal_ops;
 		sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+		if (vfe->res->hw_ops->frame_start)
+			sd->flags |= V4L2_SUBDEV_FL_HAS_EVENTS;
 		if (i == VFE_LINE_PIX && vfe->res->is_lite == false)
 			snprintf(sd->name, ARRAY_SIZE(sd->name), "%s%d_%s",
 				 MSM_VFE_NAME, vfe->id, "pix");

@@ -696,44 +696,28 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
-			return ret;
+			goto put_parent;
 
 		ret = regulator_bulk_enable(csid->num_supplies,
 					    csid->supplies);
-		if (ret < 0) {
-			pm_runtime_put_sync(dev);
-			return ret;
-		}
+		if (ret < 0)
+			goto put_pm;
 
 		ret = csid_set_clock_rates(csid);
-		if (ret < 0) {
-			regulator_bulk_disable(csid->num_supplies,
-					       csid->supplies);
-			pm_runtime_put_sync(dev);
-			return ret;
-		}
+		if (ret < 0)
+			goto disable_regulators;
 
 		ret = camss_enable_clocks(csid->nclocks, csid->clock, dev);
-		if (ret < 0) {
-			regulator_bulk_disable(csid->num_supplies,
-					       csid->supplies);
-			pm_runtime_put_sync(dev);
-			return ret;
-		}
+		if (ret < 0)
+			goto disable_regulators;
 
 		csid->phy.need_vc_update = true;
 
 		enable_irq(csid->irq);
 
 		ret = csid->res->hw_ops->reset(csid);
-		if (ret < 0) {
-			disable_irq(csid->irq);
-			camss_disable_clocks(csid->nclocks, csid->clock);
-			regulator_bulk_disable(csid->num_supplies,
-					       csid->supplies);
-			pm_runtime_put_sync(dev);
-			return ret;
-		}
+		if (ret < 0)
+			goto disable_clocks;
 
 		csid->res->hw_ops->hw_version(csid);
 	} else {
@@ -745,6 +729,17 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 		csid->res->parent_dev_ops->put(camss, csid->id);
 	}
 
+	return ret;
+
+disable_clocks:
+	disable_irq(csid->irq);
+	camss_disable_clocks(csid->nclocks, csid->clock);
+disable_regulators:
+	regulator_bulk_disable(csid->num_supplies, csid->supplies);
+put_pm:
+	pm_runtime_put_sync(dev);
+put_parent:
+	csid->res->parent_dev_ops->put(camss, csid->id);
 	return ret;
 }
 
@@ -763,6 +758,45 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 	int ret;
 
 	if (enable) {
+		if (csid->res->hw_ops == &csid_ops_980 && !csid->testgen.enabled) {
+			struct media_pad *pad = camss_find_sensor_pad(&sd->entity);
+			struct v4l2_mbus_frame_desc desc = {};
+			struct v4l2_subdev *sensor;
+			unsigned int i;
+
+			csid->phy.image_vc = 0;
+			if (!pad)
+				return -ENOLINK;
+			sensor = media_entity_to_v4l2_subdev(pad->entity);
+			ret = v4l2_subdev_call(sensor, pad, get_frame_desc, pad->index, &desc);
+			if (ret && ret != -ENOIOCTLCMD)
+				return ret;
+			if (!ret) {
+				const struct csid_format_info *format;
+
+				if (desc.type != V4L2_MBUS_FRAME_DESC_TYPE_CSI2 ||
+				    !desc.num_entries ||
+				    desc.num_entries > ARRAY_SIZE(desc.entry))
+					return -EINVAL;
+				for (i = 0; i < desc.num_entries; i++) {
+					if (desc.entry[i].stream != 0)
+						continue;
+					break;
+				}
+				if (i == desc.num_entries)
+					return -ENOLINK;
+				if (desc.entry[i].bus.csi2.vc > 3)
+					return -EOPNOTSUPP;
+				format = csid_get_fmt_entry(csid->res->formats->formats,
+							    csid->res->formats->nformats,
+							    csid->fmt[MSM_CSID_PAD_SINK].code);
+				if (desc.entry[i].bus.csi2.dt != format->data_type ||
+				    desc.entry[i].flags & V4L2_MBUS_FRAME_DESC_FL_BLOB ||
+				    desc.entry[i].pixelcode != format->code)
+					return -EINVAL;
+				csid->phy.image_vc = desc.entry[i].bus.csi2.vc;
+			}
+		}
 		if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED) {
 			ret = v4l2_ctrl_handler_setup(&csid->ctrls);
 			if (ret < 0) {
@@ -777,10 +811,15 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 			return -ENOLINK;
 	}
 
-	if (csid->phy.need_vc_update) {
+	if (csid->res->hw_ops == &csid_ops_980)
+		csid_980_diag_snapshot(csid, enable ? "before-on" : "before-off");
+	/* CSID980 start/stop commands are required even when links are unchanged. */
+	if (csid->phy.need_vc_update || csid->res->hw_ops == &csid_ops_980) {
 		csid->res->hw_ops->configure_stream(csid, enable);
 		csid->phy.need_vc_update = false;
 	}
+	if (csid->res->hw_ops == &csid_ops_980)
+		csid_980_diag_snapshot(csid, enable ? "after-on" : "after-off");
 
 	return 0;
 }
@@ -834,7 +873,8 @@ static void csid_try_format(struct csid_device *csid,
 		if (i >= csid->res->formats->nformats)
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
-		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
+		fmt->width = clamp_t(u32, fmt->width, 1,
+			csid->camss->res->version == CAMSS_8750 ? 8192 : 8191);
 		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
 
 		fmt->field = V4L2_FIELD_NONE;
@@ -864,7 +904,8 @@ static void csid_try_format(struct csid_device *csid,
 			if (i >= csid->res->formats->nformats)
 				fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
-			fmt->width = clamp_t(u32, fmt->width, 1, 8191);
+			fmt->width = clamp_t(u32, fmt->width, 1,
+			csid->camss->res->version == CAMSS_8750 ? 8192 : 8191);
 			fmt->height = clamp_t(u32, fmt->height, 1, 8191);
 
 			fmt->field = V4L2_FIELD_NONE;
@@ -1278,6 +1319,7 @@ static int csid_link_setup(struct media_entity *entity,
 			csid->phy.lane_cnt = tpg->res->lane_cnt;
 			csid->phy.csiphy_id = tpg->id;
 			csid->phy.lane_assign = csid_get_lane_assign(NULL, csid->phy.lane_cnt);
+			csid->phy.is_cphy = false;
 			csid->tpg_linked = true;
 		} else {
 			csiphy = v4l2_get_subdevdata(sd);
@@ -1288,6 +1330,8 @@ static int csid_link_setup(struct media_entity *entity,
 				return -EPERM;
 
 			csid->phy.csiphy_id = csiphy->id;
+			csid->phy.is_cphy =
+				csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY;
 
 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
 			csid->phy.lane_cnt = lane_cfg->num_data;
