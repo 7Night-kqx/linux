@@ -627,7 +627,12 @@ CONFIG_HAVE_CMPXCHG_LOCAL=y
 CONFIG_HAVE_CMPXCHG_DOUBLE=y
 CONFIG_HAVE_ARCH_SECCOMP=y
 CONFIG_HAVE_ARCH_SECCOMP_FILTER=y
-# CONFIG_SECCOMP is not set
+# OpenSSH 10.x (Debian sid) uses a seccomp sandbox in the preauth child;
+# without SECCOMP the kernel returns EINVAL for prctl(PR_SET_SECCOMP) and
+# sshd rejects every connection: "ssh_sandbox_child: prctl(PR_SET_SECCOMP):
+# Invalid argument [preauth]". SECCOMP_FILTER needs NET (already =y).
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
 CONFIG_HAVE_ARCH_KSTACK_ERASE=y
 CONFIG_HAVE_STACKPROTECTOR=y
 # CONFIG_STACKPROTECTOR is not set
