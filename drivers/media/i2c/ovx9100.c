@@ -75,6 +75,7 @@ struct ovx9100 {
 	struct v4l2_subdev sd;
 	struct media_pad pad;
 	struct v4l2_ctrl_handler ctrls;
+	/* Exposure and analogue gain are committed by one group launch. */
 	struct v4l2_ctrl *exposure;
 	struct v4l2_ctrl *again;
 	s64 link_freqs[1];
@@ -389,8 +390,9 @@ static int ovx9100_set_pattern(struct v4l2_ctrl *ctrl)
 	if (ctrl->id != V4L2_CID_TEST_PATTERN || !experimental_stream ||
 	    !module_variant || strcmp(module_variant, "ofilm"))
 		return -EINVAL;
-	if (!pm_runtime_get_if_in_use(dev))
-		return 0;
+	ret = pm_runtime_get_if_in_use(dev);
+	if (ret <= 0)
+		return ret;
 	/* Exact OFF/Custom1 sequence from the Ofilm module. */
 	count = ctrl->val ? ARRAY_SIZE(on) : ARRAY_SIZE(off);
 	ret = ovx9100_write_regs(sensor, regs, count);
@@ -434,17 +436,16 @@ static int ovx9100_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	if (ctrl->id == V4L2_CID_TEST_PATTERN)
 		return ovx9100_set_pattern(ctrl);
-	if ((ctrl->id != V4L2_CID_EXPOSURE &&
-	     ctrl->id != V4L2_CID_ANALOGUE_GAIN) || !experimental_stream ||
+	if (ctrl->id != V4L2_CID_EXPOSURE || !experimental_stream ||
 	    !module_variant || strcmp(module_variant, "ofilm"))
 		return -EINVAL;
-	if (!pm_runtime_get_if_in_use(dev))
-		return 0;
+	ret = pm_runtime_get_if_in_use(dev);
+	if (ret <= 0)
+		return ret;
 	ret = ovx9100_write_regs(sensor, regs, ARRAY_SIZE(regs));
 	if (ret) {
-		/* Best effort: never leave group hold active after a failed write. */
+		/* End a failed group, but never launch partially written controls. */
 		cci_write(sensor->regmap, CCI_REG8(0x3208), 0x10, NULL);
-		cci_write(sensor->regmap, CCI_REG8(0x3208), 0xa0, NULL);
 	}
 	if (!ret && stream_diagnostics) {
 		/* Group commands are not persistent register values. */
@@ -762,6 +763,7 @@ static int ovx9100_probe(struct i2c_client *client)
 			ret = sensor->ctrls.error;
 			goto free_ctrls;
 		}
+		v4l2_ctrl_cluster(2, &sensor->exposure);
 	}
 	sensor->sd.ctrl_handler = &sensor->ctrls;
 	sensor->sd.internal_ops = &ovx9100_internal_ops;

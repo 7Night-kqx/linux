@@ -2809,8 +2809,9 @@ static int s5kjn5_s_ctrl(struct v4l2_ctrl *ctrl)
 			return ret;
 	}
 
-	if (!pm_runtime_get_if_in_use(dev))
-		return 0;
+	ret = pm_runtime_get_if_in_use(dev);
+	if (ret <= 0)
+		return ret;
 
 	if (s5kjn5->dada) {
 		ret = s5kjn5_dada_set_ctrl(s5kjn5, ctrl);
@@ -3047,7 +3048,7 @@ static int s5kjn5_disable_streams(struct v4l2_subdev *sd,
 	struct s5kjn5 *s5kjn5 = sd_to_s5kjn5(sd);
 	struct device *dev = sd->dev;
 	u64 val;
-	int ret;
+	int ret, standby_ret = -ETIMEDOUT;
 	int i;
 
 	s5kjn5_diag_snapshot(s5kjn5, "before-off");
@@ -3058,22 +3059,34 @@ static int s5kjn5_disable_streams(struct v4l2_subdev *sd,
 		ret = cci_write(s5kjn5->regmap,
 				s5kjn5->dada ? CCI_REG16(0x0100) : S5KJN5_REG_STREAMING,
 				S5KJN5_STREAMING_OFF, NULL);
-	if (ret)
+	if (ret) {
 		dev_warn(dev, "failed to stop streaming: %d\n", ret);
+		goto out_pm;
+	}
 
 	/* Poll frame count register until it reads standby */
 	for (i = 0; i < S5KJN5_STANDBY_POLL_ITERS; i++) {
 		usleep_range(5000, 6000);
-		ret = cci_read(s5kjn5->regmap, S5KJN5_REG_FRAME_COUNT,
-			       &val, NULL);
-		if (!ret && val == S5KJN5_FRAME_COUNT_STANDBY)
+		standby_ret = cci_read(s5kjn5->regmap, S5KJN5_REG_FRAME_COUNT,
+				       &val, NULL);
+		if (standby_ret)
 			break;
+		if (val == S5KJN5_FRAME_COUNT_STANDBY)
+			break;
+		standby_ret = -ETIMEDOUT;
 	}
-	if (i == S5KJN5_STANDBY_POLL_ITERS)
+	if (standby_ret == -ETIMEDOUT)
 		dev_warn(dev, "timed out waiting for standby\n");
+	else if (standby_ret)
+		dev_warn(dev, "failed to read standby status: %d\n", standby_ret);
 
+out_pm:
 	pm_runtime_put_autosuspend(dev);
 
+	/* Complete teardown so the core can clear its enabled stream state.
+	 * Returning an error after dropping the PM reference would leave the
+	 * stream logically enabled and prevent a subsequent restart.
+	 */
 	return 0;
 }
 
